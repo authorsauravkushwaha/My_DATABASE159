@@ -68,8 +68,12 @@ func (s *Server) authorized(w http.ResponseWriter, r *http.Request, write bool) 
 	return grant, true
 }
 
+func isValidRecordIDString(id string) bool {
+	return id != "" && len(id) <= 128 && utf8.ValidString(id) && !strings.ContainsAny(id, "\x00\r\n")
+}
+
 func validRecordID(w http.ResponseWriter, id string) bool {
-	if id == "" || len(id) > 128 || !utf8.ValidString(id) || strings.ContainsAny(id, "\x00\r\n") {
+	if !isValidRecordIDString(id) {
 		fail(w, 422, "record ID must be 1–128 UTF-8 bytes without control characters")
 		return false
 	}
@@ -101,6 +105,101 @@ func (s *Server) putRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 201, map[string]string{"id": record})
+}
+
+func (s *Server) batchRecords(w http.ResponseWriter, r *http.Request) {
+	grant, ok := s.authorized(w, r, true)
+	if !ok {
+		return
+	}
+	env, err := decodeBatch(r.Body)
+	if err != nil {
+		fail(w, 422, err.Error())
+		return
+	}
+	ops := make([]wireBatchOp, 0, len(env.Records)+len(env.Deletes))
+	for _, item := range env.Records {
+		if !isValidRecordIDString(item.ID) {
+			fail(w, 422, "record ID must be 1–128 UTF-8 bytes without control characters")
+			return
+		}
+		if item.Data == nil {
+			fail(w, 422, "each batch record must include a data object")
+			return
+		}
+		if err := validateData(grant.Schema, item.Data); err != nil {
+			fail(w, 422, err.Error())
+			return
+		}
+		encoded, err := json.Marshal(item.Data)
+		if err != nil {
+			fail(w, 422, "cannot encode record")
+			return
+		}
+		ops = append(ops, wireBatchOp{
+			Key:   recordKey(grant.ProjectID, grant.CollectionID, item.ID),
+			Value: string(encoded),
+		})
+	}
+	for _, delID := range env.Deletes {
+		if !isValidRecordIDString(delID) {
+			fail(w, 422, "record ID must be 1–128 UTF-8 bytes without control characters")
+			return
+		}
+		ops = append(ops, wireBatchOp{
+			Delete: true,
+			Key:    recordKey(grant.ProjectID, grant.CollectionID, delID),
+		})
+	}
+	if err := s.client.Batch(ops); err != nil {
+		log.Printf("gateway: storage batch write failed: %v", err)
+		fail(w, 503, "storage engine unavailable")
+		return
+	}
+	writeJSON(w, 201, map[string]int{
+		"written": len(env.Records),
+		"deleted": len(env.Deletes),
+	})
+}
+
+func (s *Server) purgeCollection(w http.ResponseWriter, r *http.Request) {
+	grant, ok := s.authorized(w, r, true)
+	if !ok {
+		return
+	}
+	deleted, err := s.client.DeletePrefix(collectionKey(grant.ProjectID, grant.CollectionID))
+	if err != nil {
+		log.Printf("gateway: collection purge failed: %v", err)
+		fail(w, 503, "storage engine unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]int{"deleted": deleted})
+}
+
+func (s *Server) compactCollection(w http.ResponseWriter, r *http.Request) {
+	_, ok := s.authorized(w, r, true)
+	if !ok {
+		return
+	}
+	if err := s.client.Compact(); err != nil {
+		log.Printf("gateway: compact failed: %v", err)
+		fail(w, 503, "storage engine unavailable")
+		return
+	}
+	writeJSON(w, 200, map[string]string{"status": "compacted"})
+}
+
+func (s *Server) collectionStats(w http.ResponseWriter, r *http.Request) {
+	_, ok := s.authorized(w, r, false)
+	if !ok {
+		return
+	}
+	stats, err := s.client.Stats()
+	if err != nil {
+		fail(w, 503, "storage engine unavailable")
+		return
+	}
+	writeJSON(w, 200, stats)
 }
 
 func (s *Server) getRecord(w http.ResponseWriter, r *http.Request) {
@@ -209,6 +308,20 @@ func splitRecordKey(key string) (collection, record string) {
 	return string(collectionBytes), string(recordBytes)
 }
 
+func (s *Server) handler() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /health", s.health)
+	mux.HandleFunc("POST /v1/data/{project}/{collection}/batch", s.batchRecords)
+	mux.HandleFunc("POST /v1/data/{project}/{collection}/compact", s.compactCollection)
+	mux.HandleFunc("GET /v1/stats/{project}/{collection}", s.collectionStats)
+	mux.HandleFunc("DELETE /v1/data/{project}/{collection}", s.purgeCollection)
+	mux.HandleFunc("PUT /v1/data/{project}/{collection}/{record}", s.putRecord)
+	mux.HandleFunc("GET /v1/data/{project}/{collection}/{record}", s.getRecord)
+	mux.HandleFunc("DELETE /v1/data/{project}/{collection}/{record}", s.deleteRecord)
+	mux.HandleFunc("GET /v1/data/{project}/{collection}", s.listRecords)
+	return mux
+}
+
 func main() {
 	addr := flag.String("addr", ":8100", "HTTP listen address")
 	storage := flag.String("storage", "storage:9100", "storage engine address")
@@ -219,13 +332,15 @@ func main() {
 		log.Fatal(err)
 	}
 	s := &Server{client: &engineClient{addr: *storage}, auth: auth}
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", s.health)
-	mux.HandleFunc("PUT /v1/data/{project}/{collection}/{record}", s.putRecord)
-	mux.HandleFunc("GET /v1/data/{project}/{collection}/{record}", s.getRecord)
-	mux.HandleFunc("DELETE /v1/data/{project}/{collection}/{record}", s.deleteRecord)
-	mux.HandleFunc("GET /v1/data/{project}/{collection}", s.listRecords)
-	server := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
+	server := &http.Server{
+		Addr:              *addr,
+		Handler:           s.handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16384,
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {

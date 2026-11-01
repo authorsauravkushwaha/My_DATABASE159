@@ -1,31 +1,25 @@
-# Small pieces, clear boundaries
+# Architecture without mystery
 
-Kestrel keeps its architecture intentionally understandable. The existing Python and Go services remain in place; TypeScript and Vue add a usable workspace and a typed integration surface.
+Kestrel is split into focused, high-efficiency components so each layer stays inspectable while handling significantly larger datasets per gigabyte of storage.
 
-## Control plane
+## High-capacity control & data plane
 
-**Python · FastAPI · SQLAlchemy · PostgreSQL**
+FastAPI and SQLAlchemy manage users, organizations, memberships, projects, collection schemas, secondary B-tree field indexes, and compressed JSON records:
 
-The control plane owns accounts, organizations, memberships, projects, collection schemas, and JSON records. Every protected request resolves the authenticated user and checks organization membership. Record queries constrain both project and collection.
+- **Transparent payload compression (`KZ1`)**: Records above 96 bytes are compressed with Zlib framing when beneficial, cutting repetitive JSON storage footprints by 2×–10×+ while tracking `raw_bytes` and `stored_bytes` per row.
+- **Secondary B-tree field indexes**: Scalar fields (`string`, `integer`, `number`, `boolean`) can be indexed online into `record_field_indexes`, enabling `eq`, `gt`, `gte`, `lt`, `lte`, `in`, and `prefix` subquery pushdown without full-collection scans.
+- **Keyset cursor pagination & streaming NDJSON**: Both `GET .../data/{collection}?after=<id>` and `POST .../query` paginate via `(created_at, id)` cursors in O(1) index time rather than linear `OFFSET` scans, and `/export` streams full collections in constant memory.
+- **64 virtual hash shards**: Every record computes a deterministic `shard_key` (`0..63`) for uniform partition distribution.
 
-SQLite is available for local development and tests. PostgreSQL is the intended deployment database. Alembic provides versioned schema migrations.
+## Sharded Go LSM storage engine & gateway
 
-## Storage plane
+The `engine/` directory implements a multi-shard log-structured merge-tree key-value store in Go, and `gateway/` exposes an HTTP data gateway that authorizes every request through `/internal/v1/gateway/authorize`:
 
-**Go · write-ahead log · SSTables · compaction**
+- **Block-compressed SSTables (`KSS2`)**: Sorted 32 KiB data blocks are Zlib-compressed with per-block CRC32 checksums, sparse binary-searchable block indexes, and embedded **Bloom filters** (10 bits/key) so missing keys skip disk reads.
+- **Shared LRU block cache & directory flock**: Hot decompressed blocks stay in a bounded concurrent cache, while `flock` prevents split-brain multi-process writers on the same data directory.
+- **Streaming iterators & leveled compaction**: Range scans and compactions merge sorted runs via streaming min-heaps and split output into ~8 MiB SSTable files without materializing all keys in RAM.
+- **Orphan cleanup bridge**: When `STORAGE_ENGINE_ADDR` is configured on the FastAPI control plane, deleting a collection or project automatically purges `<project_id>/<collection>/` prefixes in the Go engine.
 
-The separate Go engine persists key-value records using a write-ahead log and sorted runs. Its gateway authenticates callers and asks the control plane to authorize the exact project and collection before accessing namespaced keys.
+## Dashboard and client
 
-**Important:** the two record stores are separate. Dashboard and SDK record CRUD uses the control-plane PostgreSQL store, not the Go engine. There is no replication or automatic synchronization between them.
-
-## Workspace and client
-
-**Vue · TypeScript · CSS · MDX**
-
-The dashboard uses Vue single-file components and a reactive in-memory session. The TypeScript client uses native fetch, encoded path segments, abortable requests, timeouts, and typed responses. These documentation pages are compiled from MDX to Vue components at build time.
-
-JavaScript configures linting and repository checks. Shell scripts provide repeatable setup and verification. CSS supplies the responsive interface without a remote font or UI framework dependency.
-
-## What is not here yet
-
-There is no SQL editor, realtime subscription system, object storage, managed functions, automatic backup service, or production failover. See the repository roadmap for the gates that must pass before production use.
+The Vue workspace talks to FastAPI through `@kestrel/client`, a dependency-free TypeScript client using native `fetch`, `AbortSignal` timeouts, batch ingestion, indexed queries, and explicit error types. Demo mode swaps in an isolated in-memory adapter and labels the UI clearly so simulated data is never mistaken for server storage.

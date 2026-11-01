@@ -72,3 +72,20 @@ test('mobile navigation and compiled MDX docs work', async ({ page }) => {
   await page.getByRole('link', { name: 'Documentation', exact: true }).click();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+test('supports high-capacity bulk ingestion, keyset pagination, and secondary B-tree index queries', async ({ page }) => {
+  await page.goto('/#/login');
+  await page.getByRole('button', { name: 'Explore the interactive demo' }).click();
+  await page.getByRole('link', { name: 'Data explorer', exact: true }).click();
+  await page.getByRole('button', { name: 'Bulk ingest', exact: true }).click();
+  await page.getByRole('button', { name: 'Generate 100 rows', exact: true }).click();
+  await page.getByRole('button', { name: 'Ingest batch', exact: true }).click();
+  await expect(page.getByText('103 total')).toBeVisible();
+  await page.getByRole('button', { name: 'Next', exact: true }).click();
+  await expect(page.getByText('Page 2')).toBeVisible();
+  await page.getByRole('button', { name: 'Query' }).click();
+  await page.getByLabel('Query value').fill('Studio headphones');
+  await page.getByRole('button', { name: 'Run query', exact: true }).click();
+  await expect(page.getByText('B-tree index (name)')).toBeVisible();
+  await expect(page.getByText('Studio headphones')).toBeVisible();
+});

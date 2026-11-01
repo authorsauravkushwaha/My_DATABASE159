@@ -1,30 +1,42 @@
 import { describe, expect, it } from 'vitest';
-import { buildSchema, parseObject, sampleData } from './schema';
+import { buildSchema, generateSampleBatch, parseBatchInput, parseObject, sampleData } from './schema';
 import { DemoApi } from './demo';
 
 describe('schema builder', () => {
-  it('builds a closed, typed schema', () => {
-    expect(buildSchema([{ name: 'title', type: 'string', required: true }, { name: 'count', type: 'integer', required: false }])).toEqual({ type: 'object', properties: { title: { type: 'string' }, count: { type: 'integer' } }, required: ['title'], additionalProperties: false });
+  it('builds a closed, typed schema with optional secondary indexes', () => {
+    expect(buildSchema([
+      { name: 'title', type: 'string', required: true, indexed: true },
+      { name: 'count', type: 'integer', required: false },
+    ])).toEqual({
+      type: 'object',
+      properties: { title: { type: 'string' }, count: { type: 'integer' } },
+      required: ['title'],
+      indexes: ['title'],
+      additionalProperties: false,
+    });
   });
   it('rejects duplicate and unsafe field names', () => {
     expect(() => buildSchema([{ name: 'x', type: 'string', required: false }, { name: 'x', type: 'number', required: false }])).toThrow('Duplicate');
     expect(() => buildSchema([{ name: 'x;drop', type: 'string', required: false }])).toThrow('Field names');
-    expect(() => buildSchema([])).toThrow('between 1 and 32');
+    expect(() => buildSchema([])).toThrow('between 1 and 128');
   });
-  it('creates editable defaults for every supported type', () => {
+  it('creates editable defaults and synthetic dataset batches', () => {
     const schema = buildSchema(['string', 'integer', 'number', 'boolean', 'object', 'array', 'null'].map((type, i) => ({ name: `f${i}`, type: type as 'string', required: false })));
     expect(Object.values(sampleData(schema))).toEqual(['Example text', 1, 9.99, false, {}, [], null]);
+    expect(generateSampleBatch(schema, 25)).toHaveLength(25);
   });
-  it('rejects invalid JSON, arrays, and oversized records', () => {
+  it('rejects invalid JSON, arrays, and oversized records while parsing batches', () => {
     expect(() => parseObject('{bad}')).toThrow('valid JSON');
     expect(() => parseObject('[]')).toThrow('JSON object');
-    expect(() => parseObject(JSON.stringify({ x: 'a'.repeat(65536) }))).toThrow('64 KiB');
+    expect(() => parseObject(JSON.stringify({ x: 'a'.repeat(524288) }))).toThrow('512 KiB');
     expect(parseObject('{"x":1}')).toEqual({ x: 1 });
+    expect(parseBatchInput('{"a":1}\n{"a":2}')).toEqual([{ a: 1 }, { a: 2 }]);
+    expect(parseBatchInput('[{"a":1},{"a":2}]')).toEqual([{ a: 1 }, { a: 2 }]);
   });
 });
 
 describe('explicit demo adapter', () => {
-  it('supports real in-memory CRUD without network', async () => {
+  it('supports real in-memory CRUD, batch ingestion, indexed queries, and NDJSON without network', async () => {
     const api = new DemoApi();
     const project = await api.createProject('demo-org', { name: 'Test', slug: 'test' });
     const collection = await api.createCollection(project.id, { name: 'notes', schema: buildSchema([{ name: 'title', type: 'string', required: true }]) });
@@ -34,6 +46,15 @@ describe('explicit demo adapter', () => {
     expect((await api.listRecords(project.id, 'notes'))[0]?.data.title).toBe('Updated');
     await api.deleteRecord(project.id, 'notes', record.id);
     expect(await api.listRecords(project.id, 'notes')).toEqual([]);
+
+    const batch = await api.batchCreateRecords(project.id, 'notes', [{ title: 'Alpha' }, { title: 'Beta' }]);
+    expect(batch.inserted).toBe(2);
+    await api.createIndex(project.id, 'notes', 'title');
+    const q = await api.queryRecords(project.id, 'notes', { filters: [{ field: 'title', op: 'prefix', value: 'Al' }] });
+    expect(q.index_used).toBe(true);
+    expect(q.records).toHaveLength(1);
+    const ndjson = await api.exportRecordsNdjson(project.id, 'notes');
+    expect(ndjson.trim().split('\n')).toHaveLength(2);
   });
   it('validates data and isolates projects', async () => {
     const api = new DemoApi();

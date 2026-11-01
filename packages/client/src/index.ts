@@ -1,10 +1,13 @@
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export type JsonObject = { [key: string]: Json };
 export type FieldType = 'string' | 'integer' | 'number' | 'boolean' | 'object' | 'array' | 'null';
+export type FilterOperator = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'in' | 'contains' | 'prefix';
+
 export interface CollectionSchema {
   type: 'object';
   properties: Record<string, { type: FieldType }>;
   required: string[];
+  indexes?: string[];
   additionalProperties: false;
 }
 export interface AuthSession {
@@ -34,7 +37,91 @@ export interface DataRecord {
   created_at: string;
   updated_at: string;
 }
-export interface PageOptions { limit?: number; offset?: number; signal?: AbortSignal }
+export interface PageOptions {
+  limit?: number | undefined;
+  offset?: number | undefined;
+  after?: string | undefined;
+  signal?: AbortSignal | undefined;
+}
+export interface QueryFilter {
+  field: string;
+  op?: FilterOperator | undefined;
+  value: Json;
+}
+export interface RecordQuery {
+  filters?: QueryFilter[] | undefined;
+  sort_dir?: 'asc' | 'desc' | undefined;
+  select?: string[] | undefined;
+  limit?: number | undefined;
+  after?: string | undefined;
+}
+export interface RecordQueryResult {
+  records: DataRecord[];
+  next_cursor: string | null;
+  returned: number;
+  scanned: number;
+  index_used: boolean;
+  indexed_fields_used: string[];
+}
+export interface BatchWriteResult {
+  inserted: number;
+  ids: string[];
+  raw_bytes: number;
+  stored_bytes: number;
+  saved_bytes: number;
+  compression_ratio: number;
+}
+export interface IndexResult {
+  collection: string;
+  field: string;
+  indexed_entries: number;
+  indexes: string[];
+}
+export interface CompactionResult {
+  collection: string;
+  total_records: number;
+  recompressed_records: number;
+  raw_bytes: number;
+  stored_bytes: number;
+  saved_bytes: number;
+  compression_ratio: number;
+}
+export interface CollectionStorageStats {
+  id: string;
+  name: string;
+  records: number;
+  compressed_records: number;
+  raw_bytes: number;
+  stored_bytes: number;
+  saved_bytes: number;
+  compression_ratio: number;
+  indexes: string[];
+}
+export interface EngineStorageStats {
+  shards?: number;
+  sstables?: number;
+  memtable_bytes?: number;
+  wal_bytes?: number;
+  logical_bytes?: number;
+  disk_bytes?: number;
+  compression_ratio?: number;
+  estimated_keys?: number;
+}
+export interface ProjectStorageStats {
+  project_id: string;
+  total_collections: number;
+  total_records: number;
+  compressed_records: number;
+  raw_bytes: number;
+  stored_bytes: number;
+  saved_bytes: number;
+  compression_ratio: number;
+  indexed_fields_count: number;
+  virtual_shards: number;
+  active_shards: number;
+  collections: CollectionStorageStats[];
+  engine?: EngineStorageStats | null;
+}
 export interface ClientOptions {
   baseUrl?: string;
   token?: string;
@@ -65,7 +152,7 @@ function detailMessage(body: Json | undefined, status: number): string {
   return `Request failed (${status})`;
 }
 
-/** A small control-plane client. Tokens stay in memory; this package never persists credentials. */
+/** A dependency-free control-plane and high-capacity data client. Tokens stay in memory. */
 export class KestrelClient {
   private readonly baseUrl: string;
   private readonly fetcher: typeof globalThis.fetch;
@@ -90,22 +177,40 @@ export class KestrelClient {
   setToken(token: string | undefined): void { this.token = token; }
   clearToken(): void { this.token = undefined; }
 
-  private async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-    const headers: Record<string, string> = { Accept: 'application/json' };
-    if (body !== undefined) headers['Content-Type'] = 'application/json';
+  private async rawRequest(
+    method: string,
+    path: string,
+    options: {
+      body?: string | undefined;
+      contentType?: string | undefined;
+      accept?: string | undefined;
+      signal?: AbortSignal | undefined;
+    } = {},
+  ): Promise<Response> {
+    const headers: Record<string, string> = { Accept: options.accept ?? 'application/json' };
+    if (options.contentType) headers['Content-Type'] = options.contentType;
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
     const timeout = AbortSignal.timeout(this.timeoutMs);
-    const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
-    let response: Response;
+    const combined = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
     try {
-      response = await this.fetcher(`${this.baseUrl}${path}`, {
-        method, headers, credentials: 'omit', signal: combined,
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      return await this.fetcher(`${this.baseUrl}${path}`, {
+        method,
+        headers,
+        credentials: 'omit',
+        signal: combined,
+        ...(options.body === undefined ? {} : { body: options.body }),
       });
     } catch (error) {
-      if (combined.aborted) throw new Error(signal?.aborted ? 'Request cancelled' : 'Request timed out', { cause: error });
+      if (combined.aborted) throw new Error(options.signal?.aborted ? 'Request cancelled' : 'Request timed out', { cause: error });
       throw new Error('Cannot reach the API. Check your connection and API proxy.', { cause: error });
     }
+  }
+
+  private async request<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+    const response = await this.rawRequest(method, path, {
+      ...(body === undefined ? {} : { body: JSON.stringify(body), contentType: 'application/json' }),
+      signal,
+    });
     if (response.status === 204) return undefined as T;
     let result: Json | undefined;
     try { result = await response.json() as Json; } catch { /* Proxies may return an empty or HTML error. */ }
@@ -135,6 +240,9 @@ export class KestrelClient {
   getProject(id: string, signal?: AbortSignal) {
     return this.request<Project>('GET', `/v1/projects/${encodeURIComponent(id)}`, undefined, signal);
   }
+  getProjectStorage(id: string, signal?: AbortSignal) {
+    return this.request<ProjectStorageStats>('GET', `/v1/projects/${encodeURIComponent(id)}/storage`, undefined, signal);
+  }
   setProjectApi(id: string, enabled: boolean) {
     return this.request<Project>('PATCH', `/v1/projects/${encodeURIComponent(id)}`, { api_enabled: enabled });
   }
@@ -150,15 +258,81 @@ export class KestrelClient {
   deleteCollection(projectId: string, name: string) {
     return this.request<void>('DELETE', `/v1/projects/${encodeURIComponent(projectId)}/collections/${encodeURIComponent(name)}`);
   }
+  createIndex(projectId: string, collection: string, field: string) {
+    return this.request<IndexResult>(
+      'POST',
+      `/v1/projects/${encodeURIComponent(projectId)}/collections/${encodeURIComponent(collection)}/indexes`,
+      { field },
+    );
+  }
+  deleteIndex(projectId: string, collection: string, field: string) {
+    return this.request<void>(
+      'DELETE',
+      `/v1/projects/${encodeURIComponent(projectId)}/collections/${encodeURIComponent(collection)}/indexes/${encodeURIComponent(field)}`,
+    );
+  }
+  compactCollection(projectId: string, collection: string) {
+    return this.request<CompactionResult>(
+      'POST',
+      `/v1/projects/${encodeURIComponent(projectId)}/collections/${encodeURIComponent(collection)}/compact`,
+    );
+  }
   private pageQuery(options: PageOptions) {
     const query = new URLSearchParams({ limit: String(options.limit ?? 50), offset: String(options.offset ?? 0) });
+    if (options.after) query.set('after', options.after);
     return query.toString();
   }
   listRecords(projectId: string, collection: string, options: PageOptions = {}) {
-    return this.request<DataRecord[]>('GET', `/v1/projects/${encodeURIComponent(projectId)}/data/${encodeURIComponent(collection)}?${this.pageQuery(options)}`, undefined, options.signal);
+    return this.request<DataRecord[]>(
+      'GET',
+      `/v1/projects/${encodeURIComponent(projectId)}/data/${encodeURIComponent(collection)}?${this.pageQuery(options)}`,
+      undefined,
+      options.signal,
+    );
+  }
+  queryRecords(projectId: string, collection: string, query: RecordQuery = {}, signal?: AbortSignal) {
+    return this.request<RecordQueryResult>(
+      'POST',
+      `/v1/projects/${encodeURIComponent(projectId)}/data/${encodeURIComponent(collection)}/query`,
+      query,
+      signal,
+    );
   }
   createRecord(projectId: string, collection: string, data: JsonObject) {
     return this.request<DataRecord>('POST', `/v1/projects/${encodeURIComponent(projectId)}/data/${encodeURIComponent(collection)}`, { data });
+  }
+  batchCreateRecords(projectId: string, collection: string, records: JsonObject[], signal?: AbortSignal) {
+    return this.request<BatchWriteResult>(
+      'POST',
+      `/v1/projects/${encodeURIComponent(projectId)}/data/${encodeURIComponent(collection)}/batch`,
+      { records },
+      signal,
+    );
+  }
+  async importRecordsNdjson(projectId: string, collection: string, ndjson: string, signal?: AbortSignal) {
+    const response = await this.rawRequest(
+      'POST',
+      `/v1/projects/${encodeURIComponent(projectId)}/data/${encodeURIComponent(collection)}/import`,
+      { body: ndjson, contentType: 'application/x-ndjson', signal },
+    );
+    let result: Json | undefined;
+    try { result = await response.json() as Json; } catch { /* ignore */ }
+    if (!response.ok) throw new ApiError(response.status, detailMessage(result, response.status), result);
+    if (result === undefined) throw new ApiError(response.status, 'The API returned an invalid JSON response');
+    return result as unknown as BatchWriteResult;
+  }
+  async exportRecordsNdjson(projectId: string, collection: string, signal?: AbortSignal): Promise<string> {
+    const response = await this.rawRequest(
+      'GET',
+      `/v1/projects/${encodeURIComponent(projectId)}/data/${encodeURIComponent(collection)}/export`,
+      { accept: 'application/x-ndjson', signal },
+    );
+    if (!response.ok) {
+      let result: Json | undefined;
+      try { result = await response.json() as Json; } catch { /* ignore */ }
+      throw new ApiError(response.status, detailMessage(result, response.status), result);
+    }
+    return response.text();
   }
   updateRecord(projectId: string, collection: string, id: string, data: JsonObject) {
     return this.request<DataRecord>('PATCH', `/v1/projects/${encodeURIComponent(projectId)}/data/${encodeURIComponent(collection)}/${encodeURIComponent(id)}`, { data });

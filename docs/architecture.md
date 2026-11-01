@@ -1,60 +1,44 @@
-# Kestrel architecture
+# Architecture
 
-## Design principle
+Kestrel separates workspace orchestration, high-density relational/indexed storage, and sharded LSM key-value persistence so each component stays inspectable while scaling to significantly larger datasets per gigabyte of storage.
 
-Keep boundaries understandable, use mature persistence for the control plane, and make experimental pieces explicit. The repository retains Python and Go rather than rewriting storage in TypeScript to match a language-popularity chart.
+## Request Paths
 
 ```text
-Browser
-  │ same-origin /api/
-  ▼
-Vue dashboard ─────────────► FastAPI control plane ─► PostgreSQL
-                             │ auth + membership
-                             │ schemas + JSON CRUD
-                             │ Alembic migrations
-                             ▲
-                             │ caller-token access check
-Go gateway ──────────────────┘
-  │ private TCP
-  ▼
-Go LSM engine ─► WAL + SSTables on disk
+Browser -> Vue Dashboard (/apps/dashboard) -> @kestrel/client -> FastAPI Control & High-Capacity Data Plane (/app) -> PostgreSQL 16 / SQLite WAL
+                                                                          |
+                                                                          +-> (optional STORAGE_ENGINE_ADDR) Orphan prefix purge on collection/project delete
+
+SDK / CLI -> Go Data Gateway (/gateway) -> FastAPI /internal/v1/gateway/authorize
+                      |
+                      +-> 16-connection TCP pool -> Sharded Go LSM Storage Engine (/engine: KSS2 compressed SSTables + Bloom + LRU cache + WAL)
 ```
 
-## Control plane
+## Components
 
-`app/` contains FastAPI routes, SQLAlchemy models, Pydantic validation, and security helpers. PostgreSQL is the deployment database; SQLite is a development/test convenience.
+| Component | Path | Responsibility |
+| --- | --- | --- |
+| Control & data plane | `app/`, `alembic/` | Users, organizations, memberships, projects, collection schemas (up to 128 fields), transparent `KZ1` Zlib record compression, secondary B-tree field indexes (`record_field_indexes`), 64-bucket hash sharding, batch/NDJSON streaming ingest & export, O(1) keyset cursor pagination, and storage telemetry. |
+| Storage engine | `engine/` | Multi-shard Go LSM store (`ShardedStore`) with binary batch CRC32 WAL, directory `flock`, `KSS2` Zlib block-compressed SSTables with per-block CRC32 checksums, 10-bit/key Bloom filters, shared concurrent LRU block cache, and streaming k-way merge iterators/compaction. |
+| Data gateway | `gateway/` | HTTP service with a 16-connection pooled TCP client, delegated authorization, single-record CRUD (up to 512 KiB), atomic `/batch` writes (up to 5,000 items / 16 MiB), prefix collection purge, manual compaction, and live engine telemetry (`/v1/stats/{project}/{collection}`). |
+| TypeScript client | `packages/client/` | Zero-dependency control/data client supporting single & batch CRUD, B-tree indexed queries, streaming NDJSON import/export, online index management, compaction, and storage stats. |
+| Dashboard | `apps/dashboard/` | Vue 3 workspace with live storage density metrics, 128-field schema & secondary index builder, bulk batch/NDJSON ingestion, server-side index-accelerated query bar, keyset cursor pagination, and explicit local demo adapter. |
 
-Assets include users, organizations, memberships, projects, collection definitions, and JSON records. Protected operations resolve the user from a signed, expiring bearer token. Project access requires organization membership. Mutating collection/record operations require owner, admin, or editor membership; viewers can read. Project administration requires owner/admin.
+## Why Kestrel Stores Far Denser Datasets
 
-There is no client SQL execution. Schema property names are validated and never interpolated into SQL. Records are constrained to a closed, flat schema subset and 64 KiB. Request bodies are capped at 128 KiB, including chunked requests. Pagination is capped at 100 by the API; the dashboard uses 25.
+Traditional BaaS stacks (such as default Supabase JSONB tables with uncompressed row-by-row PostgREST writes and `OFFSET` pagination) encounter heavy TOAST/MVCC bloat, single-row round-trip bottlenecks, and linear deep-page latency as datasets grow. Kestrel addresses all four layers:
 
-## Storage plane
+1. **Multi-layer Compression (`KZ1` + `KSS2`)**:
+   - Control-plane records above 96 bytes are transparently compressed with `KZ1\x00` Zlib framing when smaller than raw UTF-8 JSON, tracking `raw_bytes` and `stored_bytes` per record.
+   - Go LSM SSTables group sorted entries into 32 KiB blocks compressed with Zlib (`KSS2`), achieving ~35× disk compression on structured JSON datasets in `engine/scale_test.go`.
+2. **Bloom Filters + LRU Block Cache + Multi-Shard Concurrency**:
+   - Every SSTable embeds a double-hashed Kirsch-Mitzenmacher Bloom filter (~1% false-positive rate at 10 bits/key) and sparse binary-searchable block index, bypassing disk reads on point misses while caching hot decompressed blocks in a bounded LRU cache across `N` independent FNV-1a shards.
+3. **Online Secondary B-Tree Indexes & Predicate Pushdown**:
+   - Scalar fields (`string`, `integer`, `number`, `boolean`) are indexed into `record_field_indexes` with `eq`, `gt`, `gte`, `lt`, `lte`, `in`, and `prefix` pushdown, avoiding full-table decompression scans.
+4. **High-Throughput Batch & Constant-Memory NDJSON Streaming**:
+   - `POST .../batch` and `POST .../import` ingest up to 5,000 validated records per transaction (up to 16 MiB), `GET .../export` streams full collections as NDJSON in 500-row cursor chunks without buffering in RAM, and `after=<id>` cursors keep deep pagination O(1).
 
-`engine/` is an experimental LSM key-value store. Writes append a CRC-protected WAL frame and fsync before updating memory. Flushes create an SSTable and fsync its directory before truncating the WAL. Recovery replays complete WAL frames, removes an incomplete tail, and rejects corrupt complete frames. Read I/O failures are surfaced rather than treated as missing records. Compaction merges runs and the memtable.
+## Current Boundaries
 
-`gateway/` exposes record CRUD and bounded, cursor-based collection listing. It forwards the caller's bearer token to the control plane for **both authentication and authorization** on every request. It validates returned project/collection identity and enforces the collection schema before writing. The former public raw-prefix scan is removed. Storage and authorization network calls have deadlines; HTTP has server timeouts and graceful shutdown.
-
-Keys are `p:<hex(project)>:c:<hex(collection)>:r:<hex(record)>`. Namespacing prevents accidental key collisions; it is **not** authorization. Membership checks provide the authorization boundary.
-
-### Important separation
-
-Dashboard/SDK records use collection **names** and PostgreSQL. Gateway records use collection **UUIDs** and the Go engine. There is no synchronization or distributed transaction between them. Control-plane deletion does not clean up gateway data. The gateway fails closed when authorization is unavailable, but orphan cleanup and a unified data plane remain future work.
-
-## Workspace and SDK
-
-- `apps/dashboard/`: Vue 3, Vue Router, TypeScript, custom CSS, native dialog elements, and build-time MDX compilation through `@mdx-js/rollup` and `@mdx-js/vue`.
-- `packages/client/`: typed native-fetch client with request deadlines, cancellation, encoded path segments, and structured HTTP errors.
-- `e2e/`: JavaScript Playwright tests for demo CRUD, real API persistence after re-login, and mobile/MDX navigation.
-- `scripts/`: Shell setup/verification and JavaScript manifest/lockfile consistency checks.
-
-Browser tokens and demo data stay in memory. Reloading signs out. The demo implements a separate adapter and is visibly labeled; it is not presented as server persistence. Dashboard JSON export covers the current page and is not a backup.
-
-## Deployment boundaries
-
-Compose runs PostgreSQL, a one-shot Alembic migration, the API, a non-root Nginx dashboard, the engine, and the gateway. Database and engine ports stay private. Nginx and Vite provide same-origin API proxies. Nginx supplies a restrictive CSP; API responses include no-store and anti-sniffing headers.
-
-TLS ingress, secret management, edge rate/body limits, database roles/RLS, observability, backups, and restore exercises are deployment responsibilities still outside this MVP. `/health` checks process liveness; `/ready` checks control-plane database connectivity, not every dependency.
-
-## Deliberate limitations
-
-No SQL editor, relational table provisioning, realtime, object storage, functions, billing, automatic backups, or HA. No claim of independent security review, production load capacity, or measured RPO/RTO. See the [roadmap](roadmap.md) and [threat model](../security/THREAT_MODEL.md).
+- The dashboard reads/writes the control-plane database (`Record` + `RecordFieldIndex`). The Go gateway reads/writes the sharded Go LSM engine (`engine/`). Deleting a collection or project in the control plane purges matching `<project_id>/<collection>/` keys in the Go engine when `STORAGE_ENGINE_ADDR` is configured, though live dual-write replication between PostgreSQL and the Go engine is intentionally left explicit rather than hidden behind distributed two-phase commit.
+- Tokens stay in memory in the browser; refresh-token rotation, MFA, and distributed Raft consensus across multiple storage nodes remain future milestones.

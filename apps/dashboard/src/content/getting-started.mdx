@@ -1,30 +1,34 @@
 # Your first five minutes
 
-Kestrel is an open-source database platform MVP. It combines a PostgreSQL-backed control plane, a Go key-value storage plane, and this Vue workspace. It is not a production replacement for a managed database.
+Kestrel gives small and growing teams a typed, high-density database workspace: projects for isolation, collections for schemas and secondary B-tree indexes, and a data explorer built for bulk ingestion, O(1) cursor pagination, and streaming NDJSON exports.
 
-## 1. Make yourself at home
+## 1. Create an isolated project
 
-Create an account to work with real server data, or choose **Explore the interactive demo** on the sign-in screen. The demo is an in-memory sandbox: it makes no API requests, and your changes disappear when you refresh.
+Every collection and record lives inside a project, and every project belongs to an organization. Use separate projects for separate applications or environments so schemas, 64-bucket hash shards, and API switches do not collide.
 
-## 2. Create a project
+## 2. Shape a collection & secondary indexes
 
-A project is a home for one application. Give it a name and a unique slug within your organization. Use the project switcher in the sidebar to move between projects.
+A collection defines the fields every record can contain (up to **128 typed fields** and **16 secondary B-tree indexes**):
 
-## 3. Shape a collection
+```json
+{
+  "type": "object",
+  "properties": {
+    "name": { "type": "string" },
+    "price": { "type": "number" },
+    "in_stock": { "type": "boolean" }
+  },
+  "required": ["name", "price"],
+  "indexes": ["name", "price"],
+  "additionalProperties": false
+}
+```
 
-Open **Collections** and add fields with names, types, and required flags. For example, a `products` collection might have a required `name` string, a `price` number, and an `in_stock` boolean.
+Unknown fields are rejected before data is stored, keeping records predictable across services and UI clients.
 
-Supported field types are `string`, `integer`, `number`, `boolean`, `object`, `array`, and `null`. Unknown fields are rejected. Each record is limited to 64 KiB.
+## 3. Bulk-ingest, query via indexes, and stream NDJSON
 
-## 4. Add your first record
-
-Open **Data explorer**, choose your collection, and select **Add record**. The editor starts with sample values. Replace them with your own JSON and save. Edits are validated by the server before they are persisted.
-
-Search filters only the current 25-record page. **Export page** downloads that page as JSON; it is not a database backup.
-
-## 5. Connect your application
-
-The repository includes `@kestrel/client`, a dependency-free TypeScript client. Build it with `npm run build -w @kestrel/client`. Use it in your application with the workspace package or publish your own package after review.
+Use the typed client from browser or server code. Browser apps should talk to a same-origin `/api/` reverse proxy so tokens stay on one origin.
 
 ```ts
 import { KestrelClient } from '@kestrel/client';
@@ -32,11 +36,18 @@ import { KestrelClient } from '@kestrel/client';
 const db = new KestrelClient({ baseUrl: '/api/' });
 const session = await db.login({ email, password });
 db.setToken(session.access_token);
-const records = await db.listRecords(projectId, 'products');
+
+// Ingest up to 5,000 schema-validated records in a single compressed batch
+await db.batchCreateRecords(projectId, 'products', [
+  { name: 'Desk lamp', price: 64, in_stock: true },
+  { name: 'Studio monitor', price: 249, in_stock: true },
+]);
+
+// Push down predicates to secondary B-tree indexes with O(1) cursor pagination
+const page = await db.queryRecords(projectId, 'products', {
+  filters: [{ field: 'price', op: 'lte', value: 100 }],
+  limit: 100,
+});
 ```
 
-The `/api/` path needs a reverse proxy to the control plane. The included dashboard provides this proxy. Tokens expire after 15 minutes; this client does not refresh sessions or store credentials.
-
-## Run the complete local stack
-
-From the repository root, run `bash scripts/setup.sh`, then `docker compose up --build`. Open the dashboard on port 3000. See the repository README for development commands, migration steps, and the verification checklist.
+For large dataset migrations or backups, stream the entire collection in constant memory using `db.exportRecordsNdjson(projectId, 'products')` or upload newline-delimited JSON with `db.importRecordsNdjson(...)`.

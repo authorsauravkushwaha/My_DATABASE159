@@ -3,83 +3,109 @@ package engine
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net"
 	"time"
 )
 
-const maxFrameSize = 16 << 20 // 16 MiB
+const maxFrameSize = 32 << 20 // 32 MiB max TCP wire frame
 
 // frameReq is one client request over the length-prefixed JSON protocol.
 type frameReq struct {
-	Op     string `json:"op"`
-	Key    string `json:"key"`
-	Value  string `json:"value,omitempty"`
-	Prefix string `json:"prefix,omitempty"`
-	After  string `json:"after,omitempty"`
-	Limit  int    `json:"limit,omitempty"`
+	Op     string    `json:"op"`
+	Key    string    `json:"key,omitempty"`
+	Value  string    `json:"value,omitempty"`
+	Prefix string    `json:"prefix,omitempty"`
+	After  string    `json:"after,omitempty"`
+	Limit  int       `json:"limit,omitempty"`
+	Ops    []BatchOp `json:"ops,omitempty"`
 }
 
 // frameResp is one server response.
 type frameResp struct {
-	OK    bool     `json:"ok,omitempty"`
-	Value string   `json:"value,omitempty"`
-	KVs   []KVPair `json:"kvs,omitempty"`
-	Error string   `json:"error,omitempty"`
+	OK      bool        `json:"ok,omitempty"`
+	Value   string      `json:"value,omitempty"`
+	KVs     []KVPair    `json:"kvs,omitempty"`
+	Deleted int         `json:"deleted,omitempty"`
+	Stats   *StoreStats `json:"stats,omitempty"`
+	Error   string      `json:"error,omitempty"`
 }
 
-// serveConn handles one client connection: read frames, execute store ops,
-// write response frames, until the connection closes.
-func (s *LSMStore) serveConn(conn net.Conn) {
+func serveConn(ks KeyStore, conn net.Conn) {
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	header := make([]byte, 4)
 	for {
+		_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 		if _, err := io.ReadFull(conn, header); err != nil {
 			return
 		}
 		length := binary.BigEndian.Uint32(header)
-		if length > maxFrameSize {
-			log.Printf("engine: frame too large: %d bytes", length)
+		if length == 0 || length > maxFrameSize {
+			log.Printf("engine: invalid frame size: %d bytes", length)
 			return
 		}
+		_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
 		payload := make([]byte, length)
 		if _, err := io.ReadFull(conn, payload); err != nil {
 			return
 		}
 		var req frameReq
 		if err := json.Unmarshal(payload, &req); err != nil {
-			_ = s.writeFrame(conn, frameResp{Error: "invalid request: " + err.Error()})
+			_ = writeFrame(conn, frameResp{Error: "invalid request: " + err.Error()})
 			continue
 		}
-		resp := s.handleReq(req)
-		if err := s.writeFrame(conn, resp); err != nil {
+		resp := handleReq(ks, req)
+		_ = conn.SetWriteDeadline(time.Now().Add(30 * time.Second))
+		if err := writeFrame(conn, resp); err != nil {
 			return
 		}
 	}
 }
 
-func (s *LSMStore) handleReq(req frameReq) frameResp {
+func handleReq(ks KeyStore, req frameReq) frameResp {
 	switch req.Op {
 	case "set":
-		if err := s.Set([]byte(req.Key), []byte(req.Value)); err != nil {
+		if err := ks.Set([]byte(req.Key), []byte(req.Value)); err != nil {
 			return frameResp{Error: err.Error()}
 		}
 		return frameResp{OK: true}
 	case "delete":
-		if err := s.Delete([]byte(req.Key)); err != nil {
+		if err := ks.Delete([]byte(req.Key)); err != nil {
 			return frameResp{Error: err.Error()}
 		}
 		return frameResp{OK: true}
-	case "get":
-		value, _, err := s.Get(req.Key)
+	case "batch":
+		if err := ks.WriteBatch(req.Ops); err != nil {
+			return frameResp{Error: err.Error()}
+		}
+		return frameResp{OK: true}
+	case "delete_prefix":
+		deleted, err := ks.DeletePrefix(req.Prefix)
 		if err != nil {
-			return frameResp{Error: "not found"}
+			return frameResp{Error: err.Error()}
+		}
+		return frameResp{OK: true, Deleted: deleted}
+	case "compact":
+		if err := ks.Compact(); err != nil {
+			return frameResp{Error: err.Error()}
+		}
+		return frameResp{OK: true}
+	case "stats":
+		st := ks.Stats()
+		return frameResp{OK: true, Stats: &st}
+	case "get":
+		value, _, err := ks.Get(req.Key)
+		if err != nil {
+			if errors.Is(err, errNotFound) {
+				return frameResp{Error: "not found"}
+			}
+			return frameResp{Error: err.Error()}
 		}
 		return frameResp{OK: true, Value: string(value)}
 	case "scan":
-		kvs, err := s.ScanAfter(req.Prefix, req.After, req.Limit)
+		kvs, err := ks.ScanAfter(req.Prefix, req.After, req.Limit)
 		if err != nil {
 			return frameResp{Error: err.Error()}
 		}
@@ -89,7 +115,7 @@ func (s *LSMStore) handleReq(req frameReq) frameResp {
 	}
 }
 
-func (s *LSMStore) writeFrame(conn net.Conn, resp frameResp) error {
+func writeFrame(conn net.Conn, resp frameResp) error {
 	payload, err := json.Marshal(resp)
 	if err != nil {
 		return err
@@ -101,9 +127,7 @@ func (s *LSMStore) writeFrame(conn net.Conn, resp frameResp) error {
 	return err
 }
 
-// Serve listens on addr and serves store connections until the listener
-// fails or is closed.
-func (s *LSMStore) Serve(addr string) error {
+func serveKeyStore(ks KeyStore, addr string) error {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
@@ -114,7 +138,16 @@ func (s *LSMStore) Serve(addr string) error {
 		if err != nil {
 			return err
 		}
-		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
-		go s.serveConn(conn)
+		go serveConn(ks, conn)
 	}
+}
+
+// Serve listens on addr and serves store connections until closed.
+func (s *LSMStore) Serve(addr string) error {
+	return serveKeyStore(s, addr)
+}
+
+// Serve listens on addr and serves sharded store connections until closed.
+func (ss *ShardedStore) Serve(addr string) error {
+	return serveKeyStore(ss, addr)
 }

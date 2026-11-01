@@ -4,7 +4,7 @@ import { api, state, currentProject, loadProjects, notify, errorMessage } from '
 import Icon from '../components/Icon.vue';
 import Modal from '../components/Modal.vue';
 const busy = ref(false); const deleting = ref(false); const confirmation = ref(''); const error = ref(''); const copied = ref(false);
-const snippet = computed(() => `import { KestrelClient } from '@kestrel/client';\n\nconst db = new KestrelClient({ baseUrl: '/api/' });\nconst session = await db.login({\n  email: 'you@example.com',\n  password: process.env.KESTREL_PASSWORD!,\n});\ndb.setToken(session.access_token);\n\n// Use your collection name and schema.\nconst records = await db.listRecords(\n  '${currentProject.value?.id ?? 'PROJECT_ID'}',\n  'products',\n);\n`);
+const snippet = computed(() => `import { KestrelClient } from '@kestrel/client';\n\nconst db = new KestrelClient({ baseUrl: '/api/' });\nconst session = await db.login({\n  email: 'you@example.com',\n  password: process.env.KESTREL_PASSWORD!,\n});\ndb.setToken(session.access_token);\n\n// Bulk-ingest compressed batches & query via secondary B-tree indexes.\nawait db.batchCreateRecords('${currentProject.value?.id ?? 'PROJECT_ID'}', 'products', [\n  { name: 'Sensor pack', price: 49, in_stock: true },\n]);\nconst result = await db.queryRecords('${currentProject.value?.id ?? 'PROJECT_ID'}', 'products', {\n  filters: [{ field: 'price', op: 'lte', value: 100 }],\n  limit: 100,\n});\n`);
 watch(currentProject, () => { confirmation.value = ''; });
 async function toggle() {
   if (!currentProject.value) return; busy.value = true;

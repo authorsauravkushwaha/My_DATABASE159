@@ -36,6 +36,21 @@ def test_postgresql_vertical_slice():
             assert record.status_code == 201, record.text
             records = client.get(f'/v1/projects/{project}/data/notes', headers=headers)
             assert records.json()[0]['data'] == {'title': 'Persistent'}
+            batch = client.post(
+                f'/v1/projects/{project}/data/notes/batch',
+                headers=headers,
+                json={'records': [{'title': ('Compressed-PostgreSQL-Payload-' * 6) + str(i)} for i in range(50)]},
+            )
+            assert batch.status_code == 201 and batch.json()['compression_ratio'] > 1.5
+            assert client.post(f'/v1/projects/{project}/collections/notes/indexes', headers=headers, json={'field': 'title'}).status_code == 201
+            queried = client.post(
+                f'/v1/projects/{project}/data/notes/query',
+                headers=headers,
+                json={'filters': [{'field': 'title', 'op': 'eq', 'value': 'Persistent'}]},
+            )
+            assert queried.status_code == 200 and queried.json()['index_used'] is True and queried.json()['returned'] == 1
+            exported = client.get(f'/v1/projects/{project}/data/notes/export', headers=headers)
+            assert exported.status_code == 200 and len(exported.text.strip().splitlines()) == 51
             assert client.delete(f'/v1/projects/{project}', headers=headers).status_code == 204
     finally:
         app.dependency_overrides.clear()

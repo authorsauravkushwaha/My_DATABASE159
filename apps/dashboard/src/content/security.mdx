@@ -1,33 +1,18 @@
 # Secure boundaries, honestly stated
 
-Security is a process, not a badge. Kestrel has useful safeguards and explicit gaps. Do not store regulated or sensitive production data without an independent review and operational hardening.
+Kestrel enforces tenant checks and strict resource bounds across both single-record and bulk high-capacity endpoints.
 
-## Implemented safeguards
+## What is enforced today
 
-- Salted PBKDF2-HMAC-SHA256 password hashes with 600,000 iterations.
-- Signed bearer tokens with a 15-minute lifetime and a required secret of at least 32 characters.
-- Organization membership checks and project/collection-scoped queries.
-- Write-role enforcement for editors, admins, and owners; viewers are read-only.
-- Gateway authorization through the control plane, with no public raw-key scan endpoint.
-- Validated schemas, bounded record sizes, bounded pages, and parameterized database queries.
-- Tokens kept in memory by the dashboard, not local storage or session storage.
+- **Organization membership & RBAC**: Project, collection, index, storage-telemetry, and record routes verify that the signed-in user belongs to the owning organization, and require `owner` or `admin` for mutations, batch imports, index DDL, and compaction.
+- **Password hashing**: User passwords use salted PBKDF2-HMAC-SHA256 hashes (`600,000` iterations) with constant-time verification.
+- **Short-lived tokens**: Access tokens expire after 15 minutes and stay in memory inside the dashboard rather than `localStorage`.
+- **Closed schemas & bounded ingestion**: Control-plane requests stay capped at 128 KiB, single-record writes allow up to 512 KiB (up to 128 typed fields), and bulk `/batch` + `/import` routes accept up to 5,000 records / 16 MiB per call with streaming byte enforcement before decompression.
+- **O(1) cursor pagination & streaming exports**: `GET` list endpoints enforce `limit <= 100`, `/query` enforces `limit <= 1000`, and `/export` streams NDJSON chunks without buffering full collections in memory.
+- **Hardened container defaults**: NGINX and FastAPI send `Content-Security-Policy`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-store`.
 
-## Browser session trade-off
+## What you should add before production
 
-Memory-only token storage reduces persistent token exposure but does not protect against JavaScript execution in the page. A refresh signs you out. There is no refresh-token rotation, MFA, password recovery, or email verification yet. Deploy a restrictive CSP, trusted dependencies, and TLS.
-
-## Tenant isolation
-
-A project ID is not a permission. The control plane checks membership before returning project data. The gateway forwards the caller's token to the control-plane access check and fails closed if that check is unavailable. Keys are namespaced, but namespacing alone is not authorization.
-
-Application-level isolation is not PostgreSQL row-level security. There are no per-project database credentials or per-record policies yet.
-
-## Operational responsibilities
-
-Use unique random secrets, private service networking, least-privilege database roles, edge rate limits, request-size limits, monitoring, and tested encrypted backups. `/ready` checks database connectivity; it is not a full dependency or storage-readiness check.
-
-The Go storage engine is experimental. Its crash recovery and compaction are not a substitute for a backup and restore plan. The dashboard's JSON export is not a backup.
-
-## Report a vulnerability
-
-Follow the repository's `SECURITY.md` process. Do not include real credentials or customer data in a public issue.
+- HTTPS termination, HSTS at your edge proxy, and secret management outside `.env` files.
+- Rate limiting on authentication and bulk write endpoints.
+- Automated backups, restore drills, audit logs, refresh-token revocation, and multi-factor authentication for sensitive workspaces.

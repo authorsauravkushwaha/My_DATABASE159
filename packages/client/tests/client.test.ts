@@ -60,4 +60,25 @@ describe('KestrelClient', () => {
     expect(() => new KestrelClient({ baseUrl: 'file:///tmp/test' })).toThrow('HTTP(S)');
     expect(() => new KestrelClient({ baseUrl: 'https://user:pass@example.com' })).toThrow('credentials');
   });
+  it('supports batch ingestion, indexed queries, storage telemetry, and NDJSON export/import', async () => {
+    const fetch = vi.fn(async (url: string) => {
+      if (url.endsWith('/export')) {
+        return new Response('{"id":"r1","data":{"title":"One"}}\n', { status: 200, headers: { 'Content-Type': 'application/x-ndjson' } });
+      }
+      return response({ inserted: 2, ids: ['r1', 'r2'], raw_bytes: 200, stored_bytes: 80, saved_bytes: 120, compression_ratio: 2.5 }, 201);
+    });
+    const client = new KestrelClient({ fetch, token: 'tok' });
+    const batchRes = await client.batchCreateRecords('p1', 'notes', [{ title: 'One' }, { title: 'Two' }]);
+    expect(batchRes.inserted).toBe(2);
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/v1/projects/p1/data/notes/batch');
+
+    await client.importRecordsNdjson('p1', 'notes', '{"title":"One"}\n{"title":"Two"}');
+    expect(fetch.mock.calls[1]?.[0]).toBe('/api/v1/projects/p1/data/notes/import');
+
+    const ndjson = await client.exportRecordsNdjson('p1', 'notes');
+    expect(ndjson).toContain('"title":"One"');
+
+    await client.queryRecords('p1', 'notes', { filters: [{ field: 'title', op: 'prefix', value: 'O' }], limit: 50, after: 'r1' });
+    expect(fetch.mock.calls[3]?.[0]).toBe('/api/v1/projects/p1/data/notes/query');
+  });
 });
