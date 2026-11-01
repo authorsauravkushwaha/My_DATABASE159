@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"time"
 )
 
 const maxFrameSize = 16 << 20 // 16 MiB
@@ -15,14 +16,15 @@ type wireReq struct {
 	Key    string `json:"key"`
 	Value  string `json:"value,omitempty"`
 	Prefix string `json:"prefix,omitempty"`
+	After  string `json:"after,omitempty"`
 	Limit  int    `json:"limit,omitempty"`
 }
 
 type wireResp struct {
-	OK    bool    `json:"ok,omitempty"`
-	Value string  `json:"value,omitempty"`
+	OK    bool     `json:"ok,omitempty"`
+	Value string   `json:"value,omitempty"`
 	KVs   []wireKV `json:"kvs,omitempty"`
-	Error string  `json:"error,omitempty"`
+	Error string   `json:"error,omitempty"`
 }
 
 type wireKV struct {
@@ -37,11 +39,12 @@ type engineClient struct {
 }
 
 func (c *engineClient) call(req wireReq) (wireResp, error) {
-	conn, err := net.Dial("tcp", c.addr)
+	conn, err := net.DialTimeout("tcp", c.addr, 3*time.Second)
 	if err != nil {
 		return wireResp{}, err
 	}
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
 
 	payload, err := json.Marshal(req)
 	if err != nil {
@@ -90,7 +93,10 @@ func (c *engineClient) Get(key string) (string, bool, error) {
 		return "", false, err
 	}
 	if resp.Error != "" {
-		return "", false, nil
+		if resp.Error == "not found" {
+			return "", false, nil
+		}
+		return "", false, errors.New(resp.Error)
 	}
 	return resp.Value, true, nil
 }
@@ -106,8 +112,8 @@ func (c *engineClient) Delete(key string) error {
 	return nil
 }
 
-func (c *engineClient) Scan(prefix string, limit int) ([]wireKV, error) {
-	resp, err := c.call(wireReq{Op: "scan", Prefix: prefix, Limit: limit})
+func (c *engineClient) Scan(prefix, after string, limit int) ([]wireKV, error) {
+	resp, err := c.call(wireReq{Op: "scan", Prefix: prefix, After: after, Limit: limit})
 	if err != nil {
 		return nil, err
 	}

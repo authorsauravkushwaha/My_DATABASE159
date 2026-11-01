@@ -1,0 +1,31 @@
+# Small pieces, clear boundaries
+
+Kestrel keeps its architecture intentionally understandable. The existing Python and Go services remain in place; TypeScript and Vue add a usable workspace and a typed integration surface.
+
+## Control plane
+
+**Python · FastAPI · SQLAlchemy · PostgreSQL**
+
+The control plane owns accounts, organizations, memberships, projects, collection schemas, and JSON records. Every protected request resolves the authenticated user and checks organization membership. Record queries constrain both project and collection.
+
+SQLite is available for local development and tests. PostgreSQL is the intended deployment database. Alembic provides versioned schema migrations.
+
+## Storage plane
+
+**Go · write-ahead log · SSTables · compaction**
+
+The separate Go engine persists key-value records using a write-ahead log and sorted runs. Its gateway authenticates callers and asks the control plane to authorize the exact project and collection before accessing namespaced keys.
+
+**Important:** the two record stores are separate. Dashboard and SDK record CRUD uses the control-plane PostgreSQL store, not the Go engine. There is no replication or automatic synchronization between them.
+
+## Workspace and client
+
+**Vue · TypeScript · CSS · MDX**
+
+The dashboard uses Vue single-file components and a reactive in-memory session. The TypeScript client uses native fetch, encoded path segments, abortable requests, timeouts, and typed responses. These documentation pages are compiled from MDX to Vue components at build time.
+
+JavaScript configures linting and repository checks. Shell scripts provide repeatable setup and verification. CSS supplies the responsive interface without a remote font or UI framework dependency.
+
+## What is not here yet
+
+There is no SQL editor, realtime subscription system, object storage, managed functions, automatic backup service, or production failover. See the repository roadmap for the gates that must pass before production use.

@@ -1,10 +1,11 @@
+name: kestrel
 services:
   db:
     image: postgres:16-alpine
     environment:
       POSTGRES_DB: kestrel
       POSTGRES_USER: kestrel
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run bash scripts/setup.sh first}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -14,42 +15,58 @@ services:
       retries: 10
     restart: unless-stopped
 
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://kestrel:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/kestrel
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
   api:
     build: .
     environment:
       APP_ENV: development
-      AUTO_CREATE_SCHEMA: "true"
-      DATABASE_URL: postgresql+psycopg://kestrel:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/kestrel
-      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      AUTO_CREATE_SCHEMA: "false"
+      DATABASE_URL: postgresql+psycopg://kestrel:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/kestrel
+      JWT_SECRET: ${JWT_SECRET:?Run bash scripts/setup.sh first}
     depends_on:
-      db:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     restart: unless-stopped
 
-  # Storage plane: a persistent LSM-tree key/value engine (Go) serving records
-  # for projects and collections, exposed over a length-prefixed JSON protocol.
+  dashboard:
+    build:
+      context: .
+      dockerfile: apps/dashboard/Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "3000:8080"
+    restart: unless-stopped
+
   storage:
     build: ./engine
     volumes:
       - storage_data:/data
     restart: unless-stopped
 
-  # Data plane gateway: HTTP/JSON record API authenticated with the same
-  # JWT_SECRET as the control plane; keys are namespaced per project and
-  # collection so tenants can never read each other's records.
   gateway:
     build: ./gateway
     environment:
-      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
-      # STORAGE_ADDR defaults to storage:9100 via the engine:9100 flag in the
-      # Dockerfile; override here to reach a remote engine.
+      CONTROL_PLANE_URL: http://api:8000
     depends_on:
       storage:
         condition: service_started
+      api:
+        condition: service_healthy
     ports:
-      - "8100:8100"
+      - "127.0.0.1:8100:8100"
     restart: unless-stopped
 
 volumes:

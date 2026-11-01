@@ -1,0 +1,74 @@
+import { test, expect } from '@playwright/test';
+
+test('demo supports collection and record CRUD without API writes', async ({ page }) => {
+  const errors = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Explore the interactive demo' }).click();
+  await expect(page.getByText('You’re exploring a local demo.', { exact: false })).toBeVisible();
+  await page.getByRole('link', { name: 'Data explorer', exact: true }).click();
+  await expect(page.getByText('Studio headphones')).toBeVisible();
+  await page.getByRole('button', { name: 'Add record', exact: true }).click();
+  const editor = page.getByRole('textbox', { name: 'Record JSON' });
+  await editor.fill(JSON.stringify({ name: 'E2E product', price: 42, in_stock: true }));
+  await page.getByRole('button', { name: 'Create record', exact: true }).click();
+  await expect(page.getByText('E2E product', { exact: true })).toBeVisible();
+  await page.getByRole('textbox', { name: 'Search records on this page' }).fill('E2E product');
+  await page.getByRole('button', { name: /Edit record/ }).click();
+  await editor.fill(JSON.stringify({ name: 'Updated E2E product', price: 43, in_stock: false }));
+  await page.getByRole('button', { name: 'Save changes' }).click();
+  await expect(page.getByText('Updated E2E product', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: /Delete record/ }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Delete record', exact: true }).click();
+  await expect(page.getByText('No matching records')).toBeVisible();
+  expect(errors).toEqual([]);
+  expect(await page.evaluate(() => localStorage.length)).toBe(0);
+});
+
+test('real API registration, schema creation, record persistence, and sign-out', async ({ page }) => {
+  const email = `e2e-${Date.now()}@example.com`;
+  const password = 'unique-e2e-password-123!';
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Create account', exact: true }).click();
+  await page.getByLabel('Organization name').fill('E2E organization');
+  await page.getByLabel('Email address').fill(email);
+  await page.getByLabel('Password', { exact: true }).fill(password);
+  await page.getByRole('button', { name: 'Create workspace', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Your workspace, at a glance.' })).toBeVisible();
+  await page.getByRole('link', { name: 'Projects', exact: false }).first().click();
+  await page.getByRole('button', { name: 'New project', exact: true }).click();
+  await page.getByLabel('Project name').fill('E2E application');
+  await page.getByRole('dialog').getByRole('button', { name: 'Create project', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'E2E application', exact: true })).toBeVisible();
+  await page.getByRole('link', { name: 'Collections', exact: true }).click();
+  await page.getByRole('button', { name: 'New collection', exact: true }).click();
+  await page.getByLabel('Collection name').fill('notes');
+  await page.getByRole('dialog').getByRole('button', { name: 'Create collection', exact: true }).click();
+  await page.getByRole('button', { name: /notes 1 fields/ }).click();
+  await expect(page.locator('.schema-row').filter({ hasText: 'title' })).toBeVisible();
+  await page.getByRole('link', { name: 'Data explorer', exact: true }).click();
+  await page.getByRole('button', { name: 'Add record', exact: true }).click();
+  await page.getByRole('textbox', { name: 'Record JSON' }).fill('{"title":"Persisted through PostgreSQL-ready API"}');
+  await page.getByRole('button', { name: 'Create record', exact: true }).click();
+  await expect(page.getByText('Persisted through PostgreSQL-ready API')).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+  await page.getByLabel('Email address').fill(email);
+  await page.getByLabel('Password', { exact: true }).fill(password);
+  await page.getByRole('button', { name: 'Sign in to workspace' }).click();
+  await page.getByRole('link', { name: 'Data explorer', exact: true }).click();
+  await expect(page.getByText('Persisted through PostgreSQL-ready API')).toBeVisible();
+  await page.getByRole('button', { name: 'Workspace member Sign out' }).click();
+  await expect(page.getByRole('heading', { name: 'Welcome back.' })).toBeVisible();
+});
+
+test('mobile navigation and compiled MDX docs work', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/#/docs');
+  await expect(page.getByRole('heading', { name: 'Your first five minutes' })).toBeVisible();
+  await page.getByRole('button', { name: 'Security & limits' }).click();
+  await expect(page.getByRole('heading', { name: 'Secure boundaries, honestly stated' })).toBeVisible();
+  await page.getByRole('button', { name: 'Open navigation' }).click();
+  await page.getByRole('link', { name: 'Documentation', exact: true }).click();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});

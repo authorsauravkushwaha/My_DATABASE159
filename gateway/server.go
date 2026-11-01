@@ -1,13 +1,20 @@
 package main
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"strconv"
 	"strings"
+	"syscall"
+	"time"
+	"unicode/utf8"
 )
 
 // segment encodes one path component so keys can be nested safely under it.
@@ -25,7 +32,7 @@ func recordKey(project, collection, record string) string {
 
 type Server struct {
 	client *engineClient
-	secret []byte
+	auth   *authorizer
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -33,86 +40,100 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte(`{"status":"ok","service":"kestrel-gateway"}`))
 }
 
-func (s *Server) putRecord(w http.ResponseWriter, r *http.Request) {
-	project := r.PathValue("project")
-	collection := r.PathValue("collection")
-	record := r.PathValue("record")
+func decodeStoredObject(value string, target *map[string]any) error {
+	decoder := json.NewDecoder(strings.NewReader(value))
+	decoder.UseNumber()
+	return decoder.Decode(target)
+}
 
-	var body struct {
-		Data map[string]any `json:"data"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Data == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		w.Write([]byte(`{"error":"request body must be {\"data\": {...}}"}`))
-		return
-	}
-	value, err := json.Marshal(body.Data)
-	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		w.Write([]byte(`{"error":"cannot encode record data"}`))
-		return
-	}
-	if err := s.client.Set(recordKey(project, collection, record), string(value)); err != nil {
-		log.Printf("gateway: set %s/%s/%s: %v", project, collection, record, err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte(`{"error":"storage engine unavailable"}`))
-		return
-	}
-	idJSON, err := json.Marshal(record)
-	if err != nil {
-		http.Error(w, `{"error":"cannot encode record id"}`, http.StatusInternalServerError)
-		return
-	}
+func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	w.Write([]byte(`{"id":` + string(idJSON) + `}`))
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func fail(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func (s *Server) authorized(w http.ResponseWriter, r *http.Request, write bool) (accessGrant, bool) {
+	grant, status, err := s.auth.authorize(r.Context(), r.Header.Get("Authorization"), r.PathValue("project"), r.PathValue("collection"), write)
+	if err != nil {
+		if status == http.StatusUnauthorized {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+		}
+		fail(w, status, err.Error())
+		return grant, false
+	}
+	return grant, true
+}
+
+func validRecordID(w http.ResponseWriter, id string) bool {
+	if id == "" || len(id) > 128 || !utf8.ValidString(id) || strings.ContainsAny(id, "\x00\r\n") {
+		fail(w, 422, "record ID must be 1–128 UTF-8 bytes without control characters")
+		return false
+	}
+	return true
+}
+
+func (s *Server) putRecord(w http.ResponseWriter, r *http.Request) {
+	grant, ok := s.authorized(w, r, true)
+	record := r.PathValue("record")
+	if !ok || !validRecordID(w, record) {
+		return
+	}
+	data, err := decodeData(r.Body)
+	if err == nil {
+		err = validateData(grant.Schema, data)
+	}
+	if err != nil {
+		fail(w, 422, err.Error())
+		return
+	}
+	value, err := json.Marshal(data)
+	if err != nil {
+		fail(w, 422, "cannot encode record")
+		return
+	}
+	if err := s.client.Set(recordKey(grant.ProjectID, grant.CollectionID, record), string(value)); err != nil {
+		log.Printf("gateway: storage write failed: %v", err)
+		fail(w, 503, "storage engine unavailable")
+		return
+	}
+	writeJSON(w, 201, map[string]string{"id": record})
 }
 
 func (s *Server) getRecord(w http.ResponseWriter, r *http.Request) {
-	project := r.PathValue("project")
-	collection := r.PathValue("collection")
+	grant, ok := s.authorized(w, r, false)
 	record := r.PathValue("record")
-
-	value, ok, err := s.client.Get(recordKey(project, collection, record))
+	if !ok || !validRecordID(w, record) {
+		return
+	}
+	value, found, err := s.client.Get(recordKey(grant.ProjectID, grant.CollectionID, record))
 	if err != nil {
-		log.Printf("gateway: get %s/%s/%s: %v", project, collection, record, err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte(`{"error":"storage engine unavailable"}`))
+		fail(w, 503, "storage engine unavailable")
 		return
 	}
-	if !ok {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"error":"record not found"}`))
+	if !found {
+		fail(w, 404, "record not found")
 		return
 	}
-	if _, err := json.Unmarshal([]byte(value), &map[string]any{}); err != nil {
-		http.Error(w, `{"error":"corrupt record data"}`, http.StatusInternalServerError)
+	var data map[string]any
+	if decodeStoredObject(value, &data) != nil || data == nil {
+		fail(w, 500, "corrupt record data")
 		return
 	}
-	idJSON, err := json.Marshal(record)
-	if err != nil {
-		http.Error(w, `{"error":"cannot encode record id"}`, http.StatusInternalServerError)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write([]byte(`{"id":` + string(idJSON) + `,"data":` + value + `}`))
+	writeJSON(w, 200, recordEnvelope{ID: record, Data: data})
 }
 
 func (s *Server) deleteRecord(w http.ResponseWriter, r *http.Request) {
-	project := r.PathValue("project")
-	collection := r.PathValue("collection")
+	grant, ok := s.authorized(w, r, true)
 	record := r.PathValue("record")
-
-	if err := s.client.Delete(recordKey(project, collection, record)); err != nil {
-		log.Printf("gateway: delete %s/%s/%s: %v", project, collection, record, err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte(`{"error":"storage engine unavailable"}`))
+	if !ok || !validRecordID(w, record) {
+		return
+	}
+	if err := s.client.Delete(recordKey(grant.ProjectID, grant.CollectionID, record)); err != nil {
+		fail(w, 503, "storage engine unavailable")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -124,51 +145,50 @@ type recordEnvelope struct {
 }
 
 func (s *Server) listRecords(w http.ResponseWriter, r *http.Request) {
-	project := r.PathValue("project")
-	collection := r.PathValue("collection")
-
-	kvs, err := s.client.Scan(collectionKey(project, collection), 0)
-	if err != nil {
-		log.Printf("gateway: list %s/%s: %v", project, collection, err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte(`{"error":"storage engine unavailable"}`))
+	grant, ok := s.authorized(w, r, false)
+	if !ok {
 		return
+	}
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > 100 {
+			fail(w, 422, "limit must be between 1 and 100")
+			return
+		}
+		limit = n
+	}
+	prefix := collectionKey(grant.ProjectID, grant.CollectionID)
+	after := r.URL.Query().Get("after")
+	afterKey := ""
+	if after != "" {
+		if !validRecordID(w, after) {
+			return
+		}
+		// Compare full encoded keys, excluding the cursor itself.
+		afterKey = recordKey(grant.ProjectID, grant.CollectionID, after)
+	}
+	kvs, err := s.client.Scan(prefix, afterKey, limit+1)
+	if err != nil {
+		fail(w, 503, "storage engine unavailable")
+		return
+	}
+	next := ""
+	if len(kvs) > limit {
+		kvs = kvs[:limit]
+		_, next = splitRecordKey(kvs[len(kvs)-1].Key)
 	}
 	records := make([]recordEnvelope, 0, len(kvs))
 	for _, kv := range kvs {
 		_, record := splitRecordKey(kv.Key)
 		var data map[string]any
-		if err := json.Unmarshal([]byte(kv.Value), &data); err != nil {
-			continue
+		if decodeStoredObject(kv.Value, &data) != nil || data == nil {
+			fail(w, 500, "corrupt record data")
+			return
 		}
 		records = append(records, recordEnvelope{ID: record, Data: data})
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(records)
-}
-
-func (s *Server) scan(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Prefix string `json:"prefix"`
-		Limit  int    `json:"limit"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnprocessableEntity)
-		w.Write([]byte(`{"error":"invalid request body"}`))
-		return
-	}
-	kvs, err := s.client.Scan(body.Prefix, body.Limit)
-	if err != nil {
-		log.Printf("gateway: scan %q: %v", body.Prefix, err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		w.Write([]byte(`{"error":"storage engine unavailable"}`))
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(kvs)
+	writeJSON(w, 200, map[string]any{"records": records, "next_cursor": next})
 }
 
 // splitRecordKey reverses recordKey for listing output.
@@ -183,7 +203,7 @@ func splitRecordKey(key string) (collection, record string) {
 	if len(tail) != 2 {
 		return "", ""
 	}
-	projectBytes, _ := hex.DecodeString(parts[0])
+	_, _ = hex.DecodeString(parts[0])
 	collectionBytes, _ := hex.DecodeString(tail[0])
 	recordBytes, _ := hex.DecodeString(tail[1])
 	return string(collectionBytes), string(recordBytes)
@@ -191,28 +211,38 @@ func splitRecordKey(key string) (collection, record string) {
 
 func main() {
 	addr := flag.String("addr", ":8100", "HTTP listen address")
-	storage := flag.String("storage", "engine:9100", "storage engine address")
-	jwtSecret := flag.String("jwt-secret", os.Getenv("JWT_SECRET"), "HMAC secret for JWT verification (shared with the control plane)")
+	storage := flag.String("storage", "storage:9100", "storage engine address")
+	controlPlane := flag.String("control-plane", envOr("CONTROL_PLANE_URL", "http://api:8000"), "control-plane base URL")
 	flag.Parse()
-	if len(*jwtSecret) < 32 {
-		log.Fatal("gateway: JWT_SECRET must be set to at least 32 characters")
+	auth, err := newAuthorizer(*controlPlane)
+	if err != nil {
+		log.Fatal(err)
 	}
-
-	s := &Server{
-		client: &engineClient{addr: *storage},
-		secret: []byte(*jwtSecret),
-	}
-
+	s := &Server{client: &engineClient{addr: *storage}, auth: auth}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
-	mux.HandleFunc("PUT /v1/data/{project}/{collection}/{record}", requireAuth(s.secret, s.putRecord))
-	mux.HandleFunc("GET /v1/data/{project}/{collection}/{record}", requireAuth(s.secret, s.getRecord))
-	mux.HandleFunc("DELETE /v1/data/{project}/{collection}/{record}", requireAuth(s.secret, s.deleteRecord))
-	mux.HandleFunc("GET /v1/data/{project}/{collection}", requireAuth(s.secret, s.listRecords))
-	mux.HandleFunc("POST /v1/scan", requireAuth(s.secret, s.scan))
-
-	log.Printf("kestrel gateway listening on %s (storage=%s)", *addr, *storage)
-	if err := http.ListenAndServe(*addr, mux); err != nil {
-		log.Fatalf("gateway: listen: %v", err)
+	mux.HandleFunc("PUT /v1/data/{project}/{collection}/{record}", s.putRecord)
+	mux.HandleFunc("GET /v1/data/{project}/{collection}/{record}", s.getRecord)
+	mux.HandleFunc("DELETE /v1/data/{project}/{collection}/{record}", s.deleteRecord)
+	mux.HandleFunc("GET /v1/data/{project}/{collection}", s.listRecords)
+	server := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16384}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdown)
+	}()
+	log.Printf("kestrel gateway listening on %s (authorization delegated to control plane)", *addr)
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
 	}
+}
+
+func envOr(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
 }

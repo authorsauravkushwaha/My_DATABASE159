@@ -96,5 +96,14 @@ class RecordResponse(BaseModel):
     updated_at: Any
 
 
+class DataAccessResponse(BaseModel):
+    project_id: str
+    collection_id: str
+    name: str
+    collection_definition: dict[str, Any] = Field(alias="schema")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class ErrorResponse(BaseModel):
     detail: str

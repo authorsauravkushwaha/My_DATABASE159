@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"hash/crc32"
 	"io"
 	"os"
@@ -31,7 +32,7 @@ type WAL struct {
 }
 
 func openWAL(path string) (*WAL, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -70,6 +71,7 @@ func (w *WAL) Replay() ([]walEntry, error) {
 	}
 
 	var out []walEntry
+	validEnd := int64(0)
 	head := make([]byte, 4)
 	for {
 		if _, err := io.ReadFull(w.file, head); err != nil {
@@ -77,7 +79,7 @@ func (w *WAL) Replay() ([]walEntry, error) {
 		}
 		length := binary.BigEndian.Uint32(head)
 		if length > 16<<20 {
-			break // corrupt length
+			return nil, errors.New("corrupt WAL frame length")
 		}
 		payload := make([]byte, length)
 		if _, err := io.ReadFull(w.file, payload); err != nil {
@@ -91,13 +93,27 @@ func (w *WAL) Replay() ([]walEntry, error) {
 		hash.Write(head)
 		hash.Write(payload)
 		if hash.Sum32() != binary.BigEndian.Uint32(crcBuf) {
-			break
+			return nil, errors.New("corrupt WAL checksum; refusing partial recovery")
 		}
 		var e walEntry
 		if err := json.Unmarshal(payload, &e); err != nil {
-			break
+			return nil, err
+		}
+		if e.Op != walSetOp && e.Op != walDelOp {
+			return nil, errors.New("unknown WAL operation")
 		}
 		out = append(out, e)
+		validEnd += int64(4 + len(payload) + 4)
+	}
+	// Remove an incomplete final frame left by a crash before new appends.
+	if err := w.file.Truncate(validEnd); err != nil {
+		return nil, err
+	}
+	if _, err := w.file.Seek(0, io.SeekEnd); err != nil {
+		return nil, err
+	}
+	if err := w.file.Sync(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -109,8 +125,10 @@ func (w *WAL) Truncate() error {
 	if err := w.file.Truncate(0); err != nil {
 		return err
 	}
-	_, err := w.file.Seek(0, io.SeekStart)
-	return err
+	if _, err := w.file.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	return w.file.Sync()
 }
 
 func (w *WAL) Close() error {

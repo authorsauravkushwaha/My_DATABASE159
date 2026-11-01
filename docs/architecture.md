@@ -1,82 +1,60 @@
-# Kestrel architecture (MVP)
+# Kestrel architecture
 
-## Assessment and design decision
+## Design principle
 
-The repository was an empty shell: the initial commit contained only a 17-byte README and no source, tests, deployment files, or existing interfaces. The first milestone therefore establishes a working and testable vertical slice rather than pretending to deliver an entire hyperscale backend.
-
-**Stack:** Python 3.11+, FastAPI, SQLAlchemy 2, PostgreSQL 16, psycopg 3, PyJWT, and pytest. Docker Compose is the single-node local deployment. SQLite is supported only as a test/local convenience. PostgreSQL remains the intended primary platform datastore. These choices favor mature components, fast iteration, and a low-operational-complexity starting point.
-
-## MVP request/data flow
+Keep boundaries understandable, use mature persistence for the control plane, and make experimental pieces explicit. The repository retains Python and Go rather than rewriting storage in TypeScript to match a language-popularity chart.
 
 ```text
-Developer client
-    | HTTPS at deployment edge (TLS termination not included in this repo)
-    v
-FastAPI API (auth + request validation + membership checks)
-    | SQLAlchemy parameterized queries
-    v
-PostgreSQL (users, organizations, memberships, projects, collection definitions, JSON records)
+Browser
+  │ same-origin /api/
+  ▼
+Vue dashboard ─────────────► FastAPI control plane ─► PostgreSQL
+                             │ auth + membership
+                             │ schemas + JSON CRUD
+                             │ Alembic migrations
+                             ▲
+                             │ caller-token access check
+Go gateway ──────────────────┘
+  │ private TCP
+  ▼
+Go LSM engine ─► WAL + SSTables on disk
 ```
 
-The implemented API surface is authentication, organization/project metadata, collection definitions, and a constrained JSON record API. Records are not dynamically created SQL tables. Client-provided SQL is never executed. Access to every organization/project endpoint is resolved using the authenticated user and membership; record queries additionally constrain both project and collection IDs. Unauthenticated and cross-tenant requests are denied.
+## Control plane
 
-## Full intended repository structure
+`app/` contains FastAPI routes, SQLAlchemy models, Pydantic validation, and security helpers. PostgreSQL is the deployment database; SQLite is a development/test convenience.
 
-```text
-app/                       # MVP API and persistence layer
-  db.py, main.py, models.py, schemas.py, security.py
-tests/                     # MVP API and tenant-isolation tests
-docs/                      # architecture, roadmap, deployment
-security/                  # threat model and security process
-.github/workflows/          # CI (lint, test, dependency audit)
-Dockerfile
-docker-compose.yml
-requirements*.txt
-README.md
-CONTRIBUTING.md
-SECURITY.md
-LICENSE
-```
+Assets include users, organizations, memberships, projects, collection definitions, and JSON records. Protected operations resolve the user from a signed, expiring bearer token. Project access requires organization membership. Mutating collection/record operations require owner, admin, or editor membership; viewers can read. Project administration requires owner/admin.
 
-As capabilities arrive, expand into a modular monorepo: `apps/dashboard`, `services/{gateway,auth,projects,database,realtime,storage,functions,workers}`, `packages/{sdk-js,sdk-python,shared-types,cli}`, `database/{migrations,seeds}`, `infrastructure/{terraform,monitoring}`, `security/{policies,security-tests}`, and `docs`. Do not create empty services solely to imply they exist. Keep service boundaries logical until independent scaling or deployment has a measured benefit.
+There is no client SQL execution. Schema property names are validated and never interpolated into SQL. Records are constrained to a closed, flat schema subset and 64 KiB. Request bodies are capped at 128 KiB, including chunked requests. Pagination is capped at 100 by the API; the dashboard uses 25.
 
-## Service boundaries and evolution
+## Storage plane
 
-1. **Control plane (now):** account, organization, membership, project and collection metadata. It currently shares one API process and one PostgreSQL instance.
-2. **Data plane (next):** provision project databases/schemas with isolated database roles, private networking and pooling; generated APIs should delegate enforcement to PostgreSQL RLS as a second authorization boundary.
-3. **Identity:** email verification, recovery, MFA/passkeys, OAuth/OIDC, session revocation and organization invitations. A distinct auth service only when operationally justified.
-4. **Data APIs:** schema-aware REST/OpenAPI generation. GraphQL and SQL editor follow only after tenant enforcement, resource limits, auditing, and query controls are proven.
-5. **Event/storage/compute:** PostgreSQL logical decoding/outbox plus a broker for realtime; S3-compatible object storage; isolated function workers (never in the API process).
-6. **Operations:** migration runner, pooled connections, encrypted backups, restore drills, OpenTelemetry, quotas, billing and infrastructure automation.
+`engine/` is an experimental LSM key-value store. Writes append a CRC-protected WAL frame and fsync before updating memory. Flushes create an SSTable and fsync its directory before truncating the WAL. Recovery replays complete WAL frames, removes an incomplete tail, and rejects corrupt complete frames. Read I/O failures are surfaced rather than treated as missing records. Compaction merges runs and the memtable.
 
-## Security principles
+`gateway/` exposes record CRUD and bounded, cursor-based collection listing. It forwards the caller's bearer token to the control plane for **both authentication and authorization** on every request. It validates returned project/collection identity and enforces the collection schema before writing. The former public raw-prefix scan is removed. Storage and authorization network calls have deadlines; HTTP has server timeouts and graceful shutdown.
 
-- deny by default; identify a principal before project access; return 404 for inaccessible organization/project resources to reduce enumeration;
-- use parameterized ORM operations; JSON property names are validated and never interpolated into SQL;
-- short-lived signed access tokens, high-iteration salted password hashes, minimum password length, no secrets in source;
-- production should use managed secret storage, TLS, separate least-privilege service/database roles, network isolation, rate limiting and audit trails;
-- do not treat this MVP's application-level filters as a substitute for PostgreSQL RLS or isolated project credentials.
+Keys are `p:<hex(project)>:c:<hex(collection)>:r:<hex(record)>`. Namespacing prevents accidental key collisions; it is **not** authorization. Membership checks provide the authorization boundary.
 
-## Data plane: storage engine and gateway
+### Important separation
 
-The second service boundary is the data plane, implemented in Go and run
-alongside the control plane:
+Dashboard/SDK records use collection **names** and PostgreSQL. Gateway records use collection **UUIDs** and the Go engine. There is no synchronization or distributed transaction between them. Control-plane deletion does not clean up gateway data. The gateway fails closed when authorization is unavailable, but orphan cleanup and a unified data plane remain future work.
 
-- **storage engine** (`engine/`): a persistent LSM-tree key-value store. Writes
-  are fsync'd to a write-ahead log and a memory table before they become
-  visible; the memtable is periodically flushed to sorted SSTable runs on disk,
-  and compaction merges runs while dropping obsolete tombstones. After a crash,
-  the store reopens by replaying the WAL. Get/Set/Delete/Scan are served over
-  a length-prefixed JSON TCP protocol.
-- **gateway** (`gateway/`): an HTTP/JSON data API that authenticates every
-  request with the same `JWT_SECRET` as the control plane and namespaces every
-  stored key as `p:<hex(project)>:c:<hex(collection)>:r:<hex(record)>`. Because
-  keys are scoped by project and collection, cross-tenant reads are impossible
-  at the storage layer no matter who calls the gateway.
+## Workspace and SDK
 
-The control plane (Python) owns authorization — who may touch which project —
-while the gateway owns authentication and key namespacing. Record CRUD is not
-yet delegated from the control plane to the data plane; that wiring is the next
-step after the storage plane is proven.
+- `apps/dashboard/`: Vue 3, Vue Router, TypeScript, custom CSS, native dialog elements, and build-time MDX compilation through `@mdx-js/rollup` and `@mdx-js/vue`.
+- `packages/client/`: typed native-fetch client with request deadlines, cancellation, encoded path segments, and structured HTTP errors.
+- `e2e/`: JavaScript Playwright tests for demo CRUD, real API persistence after re-login, and mobile/MDX navigation.
+- `scripts/`: Shell setup/verification and JavaScript manifest/lockfile consistency checks.
 
-Threats and remaining gaps are detailed in [../security/THREAT_MODEL.md](../security/THREAT_MODEL.md). The system is not represented as production-ready or independently audited.
+Browser tokens and demo data stay in memory. Reloading signs out. The demo implements a separate adapter and is visibly labeled; it is not presented as server persistence. Dashboard JSON export covers the current page and is not a backup.
+
+## Deployment boundaries
+
+Compose runs PostgreSQL, a one-shot Alembic migration, the API, a non-root Nginx dashboard, the engine, and the gateway. Database and engine ports stay private. Nginx and Vite provide same-origin API proxies. Nginx supplies a restrictive CSP; API responses include no-store and anti-sniffing headers.
+
+TLS ingress, secret management, edge rate/body limits, database roles/RLS, observability, backups, and restore exercises are deployment responsibilities still outside this MVP. `/health` checks process liveness; `/ready` checks control-plane database connectivity, not every dependency.
+
+## Deliberate limitations
+
+No SQL editor, relational table provisioning, realtime, object storage, functions, billing, automatic backups, or HA. No claim of independent security review, production load capacity, or measured RPO/RTO. See the [roadmap](roadmap.md) and [threat model](../security/THREAT_MODEL.md).
