@@ -13,6 +13,33 @@ The `migrate` service runs `alembic upgrade head` and must finish successfully b
 
 Do not use example/empty secrets. Do not expose this development topology directly to the internet. The dashboard's CSP allows same-origin API requests; it does not require permissive CORS.
 
+## Static GitHub Pages site
+
+`.github/workflows/pages.yml` publishes the Vue workspace as a static site on every push
+to `main`. It is a demonstration and documentation site, not a deployment of the API.
+
+```bash
+VITE_BASE=/My_DATABASE159/ VITE_STATIC_DEMO=true npm run build -w @kestrel/dashboard
+# or, with the base path handled for you:
+bash scripts/build-site.sh /My_DATABASE159/
+```
+
+- `VITE_BASE` is the asset path for a project page; use `/` for a user or organization page.
+- `VITE_STATIC_DEMO=true` opens the marketing page at `/#/home` and replaces the sign-in
+  form with demo entry, because a static host has no control plane to authenticate against.
+- The output is `apps/dashboard/dist`: one `index.html`, hashed assets, `favicon.svg`, and
+  `.nojekyll`. Routing is hash-based, so deep links need no rewrite rules.
+- The site makes **no API requests**. The workspace runs in its in-memory demo mode and
+  resets on refresh; nothing is stored in the browser.
+
+To publish, enable **Settings → Pages → Source: GitHub Actions** once. The workflow's
+`deploy` job uses the `github-pages` environment and needs `pages: write` and
+`id-token: write`, which are already declared. Preview the same artifact locally with
+`npm run site` (builds for `/` and serves `apps/dashboard/dist`).
+
+Do not treat this site as evidence of production readiness: it has no account system, no
+persistence, and no data of its own.
+
 ## Database migrations
 
 Always back up and test a migration on a copy before applying it to real data.

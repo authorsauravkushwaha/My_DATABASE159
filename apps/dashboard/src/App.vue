@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { state, selectProject, signOut, checkHealth, loadProjects } from './lib/store';
 import Icon from './components/Icon.vue';
 import Auth from './components/Auth.vue';
+import Landing from './views/Landing.vue';
 const route = useRoute(); const router = useRouter(); const mobileOpen = ref(false);
 const navigation = [
   { path: '/overview', label: 'Overview', icon: 'grid' },
@@ -16,12 +17,13 @@ onMounted(checkHealth);
 async function logout() { signOut(); await router.push('/overview'); }
 </script>
 <template>
-  <Auth v-if="!state.session && route.path !== '/docs'" />
+  <Landing v-if="route.path === '/home'" />
+  <Auth v-else-if="!state.session && route.path !== '/docs'" />
   <div v-else class="app-shell">
     <a href="#main-content" class="skip-link">Skip to content</a>
     <button v-if="mobileOpen" class="sidebar-backdrop" aria-label="Close navigation" @click="mobileOpen = false"></button>
     <aside class="sidebar" :class="{ open: mobileOpen }">
-      <RouterLink to="/overview" class="brand light"><span class="brand-mark">K</span>kestrel<span class="brand-dot">.</span></RouterLink>
+      <RouterLink to="/home" class="brand light"><span class="brand-mark">K</span>kestrel<span class="brand-dot">.</span></RouterLink>
       <div class="workspace-label"><span class="workspace-avatar">{{ state.demo ? 'D' : 'W' }}</span><div><strong>{{ state.demo ? 'Demo workspace' : 'My workspace' }}</strong><small>{{ state.demo ? 'In-memory sandbox' : 'Developer workspace' }}</small></div></div>
       <template v-if="state.session">
         <label class="project-switch">PROJECT<select :value="state.projectId" aria-label="Active project" @change="selectProject(($event.target as HTMLSelectElement).value)"><option v-if="!state.projects.length" value="">No projects yet</option><option v-for="project in state.projects" :key="project.id" :value="project.id">{{ project.name }}</option></select></label>
