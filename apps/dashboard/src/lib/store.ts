@@ -1,5 +1,5 @@
 import { computed, reactive, shallowRef } from 'vue';
-import { KestrelClient, type AuthSession, type Collection, type Project } from '@kestrel/client';
+import { KestrelClient, type AuthSession, type Collection, type Project, type ProjectStorageStats } from '@kestrel/client';
 import { DemoApi, type WorkspaceApi } from './demo';
 
 export const client = new KestrelClient();
@@ -9,6 +9,7 @@ export const state = reactive({
   projects: [] as Project[],
   projectId: '',
   collections: [] as Collection[],
+  storage: null as ProjectStorageStats | null,
   loading: false,
   error: '',
   notice: '',
@@ -27,7 +28,7 @@ export function notify(message: string) {
 export function errorMessage(error: unknown) { return error instanceof Error ? error.message : 'Something went wrong. Please try again.'; }
 export function signOut() {
   client.clearToken(); state.session = null; state.demo = false; state.projects = []; state.collections = [];
-  state.projectId = ''; state.error = ''; state.notice = ''; state.health = 'unknown'; api.value = client;
+  state.storage = null; state.projectId = ''; state.error = ''; state.notice = ''; state.health = 'unknown'; api.value = client;
   clearTimeout(expiryTimer); loadVersion++; state.loading = false;
 }
 export async function signIn(session: AuthSession, demo = false) {
@@ -52,16 +53,34 @@ export async function loadProjects() {
   } catch (error) { if (version === loadVersion) state.error = errorMessage(error); }
   finally { if (version === loadVersion) state.loading = false; }
 }
-export async function loadCollections(version = loadVersion) {
-  if (!state.projectId || !currentProject.value?.api_enabled) { state.collections = []; return; }
+export async function loadStorage(version = loadVersion) {
+  if (!state.projectId) { state.storage = null; return; }
   const projectId = state.projectId;
   try {
-    const collections = await api.value.listCollections(projectId);
-    if (version === loadVersion && projectId === state.projectId) state.collections = collections;
+    const storage = await api.value.getProjectStorage(projectId);
+    if (version === loadVersion && projectId === state.projectId) state.storage = storage;
+  } catch { /* non-fatal */ }
+}
+export async function loadCollections(version = loadVersion) {
+  if (!state.projectId || !currentProject.value?.api_enabled) {
+    state.collections = [];
+    await loadStorage(version);
+    return;
+  }
+  const projectId = state.projectId;
+  try {
+    const [collections, storage] = await Promise.all([
+      api.value.listCollections(projectId),
+      api.value.getProjectStorage(projectId).catch(() => null),
+    ]);
+    if (version === loadVersion && projectId === state.projectId) {
+      state.collections = collections;
+      state.storage = storage;
+    }
   } catch (error) { if (version === loadVersion) { state.collections = []; throw error; } }
 }
 export async function selectProject(id: string) {
-  state.projectId = id; state.collections = []; await loadProjects();
+  state.projectId = id; state.collections = []; state.storage = null; await loadProjects();
 }
 export async function checkHealth() {
   if (state.demo) { state.health = 'unknown'; return; }

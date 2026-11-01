@@ -1,6 +1,8 @@
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+
+FilterOperator = Literal["eq", "neq", "gt", "gte", "lt", "lte", "in", "contains", "prefix"]
 
 
 class RegisterRequest(BaseModel):
@@ -67,7 +69,7 @@ class ProjectResponse(BaseModel):
 
 class CollectionCreate(BaseModel):
     name: str = Field(min_length=1, max_length=63, pattern=r"^[a-z][a-z0-9_]*$")
-    collection_definition: dict[str, Any] = Field(default_factory=dict, max_length=32, alias="schema")
+    collection_definition: dict[str, Any] = Field(default_factory=dict, max_length=16, alias="schema")
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -94,6 +96,93 @@ class RecordResponse(BaseModel):
     data: dict[str, Any]
     created_at: Any
     updated_at: Any
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BatchRecordCreate(BaseModel):
+    records: list[dict[str, Any]] = Field(min_length=1, max_length=5000)
+
+
+class BatchWriteResponse(BaseModel):
+    inserted: int
+    ids: list[str]
+    raw_bytes: int
+    stored_bytes: int
+    saved_bytes: int
+    compression_ratio: float
+
+
+class QueryFilter(BaseModel):
+    field: str = Field(min_length=1, max_length=63)
+    op: FilterOperator = "eq"
+    value: Any = None
+
+
+class RecordQueryRequest(BaseModel):
+    filters: list[QueryFilter] = Field(default_factory=list, max_length=16)
+    sort_dir: Literal["asc", "desc"] = "asc"
+    select: list[str] | None = Field(default=None, max_length=128)
+    limit: int = Field(default=100, ge=1, le=1000)
+    after: str | None = Field(default=None, max_length=128)
+
+
+class RecordQueryResponse(BaseModel):
+    records: list[RecordResponse]
+    next_cursor: str | None = None
+    returned: int
+    scanned: int
+    index_used: bool
+    indexed_fields_used: list[str]
+
+
+class IndexCreateRequest(BaseModel):
+    field: str = Field(min_length=1, max_length=63)
+
+
+class IndexResponse(BaseModel):
+    collection: str
+    field: str
+    indexed_entries: int
+    indexes: list[str]
+
+
+class CompactionResponse(BaseModel):
+    collection: str
+    total_records: int
+    recompressed_records: int
+    raw_bytes: int
+    stored_bytes: int
+    saved_bytes: int
+    compression_ratio: float
+
+
+class CollectionStorageStats(BaseModel):
+    id: str
+    name: str
+    records: int
+    compressed_records: int
+    raw_bytes: int
+    stored_bytes: int
+    saved_bytes: int
+    compression_ratio: float
+    indexes: list[str]
+
+
+class ProjectStorageResponse(BaseModel):
+    project_id: str
+    total_collections: int
+    total_records: int
+    compressed_records: int
+    raw_bytes: int
+    stored_bytes: int
+    saved_bytes: int
+    compression_ratio: float
+    indexed_fields_count: int
+    virtual_shards: int
+    active_shards: int
+    collections: list[CollectionStorageStats]
+    engine: dict[str, Any] | None = None
 
 
 class DataAccessResponse(BaseModel):

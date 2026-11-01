@@ -36,11 +36,7 @@ func testServer(t *testing.T, status int) (*Server, *httptest.Server, *int) {
 }
 
 func request(s *Server, method, path, body, token string) *httptest.ResponseRecorder {
-	mux := http.NewServeMux()
-	mux.HandleFunc("PUT /v1/data/{project}/{collection}/{record}", s.putRecord)
-	mux.HandleFunc("GET /v1/data/{project}/{collection}/{record}", s.getRecord)
-	mux.HandleFunc("DELETE /v1/data/{project}/{collection}/{record}", s.deleteRecord)
-	mux.HandleFunc("GET /v1/data/{project}/{collection}", s.listRecords)
+	mux := s.handler()
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
@@ -142,5 +138,32 @@ func TestCursorAndKeyIsolation(t *testing.T) {
 	encoded, _ := json.Marshal(data)
 	if !strings.Contains(string(encoded), "9007199254740993") {
 		t.Fatal("large integer lost precision")
+	}
+}
+
+func TestGatewayBatchPurgeAndStatsAuthorizationAndValidation(t *testing.T) {
+	s, _, _ := testServer(t, 200)
+	if w := request(s, "POST", "/v1/data/p1/c1/batch", `{"records":[{"id":"r1","data":{"title":"ok"}}]}`, ""); w.Code != 401 {
+		t.Fatalf("expected 401 for unauthenticated batch, got %d", w.Code)
+	}
+	for _, badBatch := range []string{
+		`{"records":[]}`,
+		`{"records":[{"id":"","data":{"title":"x"}}]}`,
+		`{"records":[{"id":"r1","data":{"title":123}}]}`,
+		`{"records":[{"id":"r1","data":{"unknown":"x"}}]}`,
+	} {
+		if w := request(s, "POST", "/v1/data/p1/c1/batch", badBatch, "valid"); w.Code != 422 {
+			t.Fatalf("batch=%s got status=%d", badBatch, w.Code)
+		}
+	}
+	// Valid batch passes authorization and schema check, then hits offline engine (503).
+	if w := request(s, "POST", "/v1/data/p1/c1/batch", `{"records":[{"id":"r1","data":{"title":"valid"}}],"deletes":["r2"]}`, "valid"); w.Code != 503 {
+		t.Fatalf("expected 503 for valid batch against offline engine, got %d: %s", w.Code, w.Body)
+	}
+	if w := request(s, "DELETE", "/v1/data/p1/c1", "", "valid"); w.Code != 503 {
+		t.Fatalf("expected 503 for authorized collection purge against offline engine, got %d", w.Code)
+	}
+	if w := request(s, "GET", "/v1/stats/p1/c1", "", "valid"); w.Code != 503 {
+		t.Fatalf("expected 503 for authorized stats against offline engine, got %d", w.Code)
 	}
 }

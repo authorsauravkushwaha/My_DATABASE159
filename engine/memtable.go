@@ -1,6 +1,10 @@
 package engine
 
-import "sync"
+import (
+	"sort"
+	"strings"
+	"sync"
+)
 
 // memEntry holds one recent mutation in the memtable.
 type memEntry struct {
@@ -12,7 +16,7 @@ type memEntry struct {
 type MemTable struct {
 	mu    sync.RWMutex
 	items map[string]memEntry
-	size  int // approximate byte size of all entries
+	size  int // accurate live byte size of all entries
 }
 
 func newMemTable() *MemTable {
@@ -22,8 +26,16 @@ func newMemTable() *MemTable {
 func (m *MemTable) Put(key string, value []byte, deleted bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.items[key] = memEntry{value: append([]byte(nil), value...), deleted: deleted}
-	m.size += len(key) + len(value)
+	if prev, exists := m.items[key]; exists {
+		m.size -= len(key) + len(prev.value)
+	}
+	var copied []byte
+	if !deleted && value != nil {
+		copied = make([]byte, len(value))
+		copy(copied, value)
+	}
+	m.items[key] = memEntry{value: copied, deleted: deleted}
+	m.size += len(key) + len(copied)
 }
 
 func (m *MemTable) Get(key string) (value []byte, deleted bool, ok bool) {
@@ -46,6 +58,43 @@ func (m *MemTable) Snapshot() map[string]memEntry {
 		out[k] = v
 	}
 	return out
+}
+
+// SortedRange returns sorted memtable entries matching prefix and strictly > after
+// (or >= startKey if inclusive is true).
+func (m *MemTable) SortedRange(prefix, after string, inclusive bool) []sstableEntry {
+	m.mu.RLock()
+	out := make([]sstableEntry, 0, 64)
+	for k, v := range m.items {
+		if prefix != "" && !strings.HasPrefix(k, prefix) {
+			continue
+		}
+		if after != "" {
+			if inclusive {
+				if k < after {
+					continue
+				}
+			} else if k <= after {
+				continue
+			}
+		}
+		if v.deleted {
+			out = append(out, sstableEntry{op: walDelOp, key: k})
+		} else {
+			out = append(out, sstableEntry{op: walSetOp, key: k, value: v.value})
+		}
+	}
+	m.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].key < out[j].key
+	})
+	return out
+}
+
+func (m *MemTable) Len() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.items)
 }
 
 func (m *MemTable) Reset() {

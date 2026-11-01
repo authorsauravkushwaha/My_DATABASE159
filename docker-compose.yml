@@ -32,6 +32,7 @@ services:
       AUTO_CREATE_SCHEMA: "false"
       DATABASE_URL: postgresql+psycopg://kestrel:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/kestrel
       JWT_SECRET: ${JWT_SECRET:?Run bash scripts/setup.sh first}
+      STORAGE_ENGINE_ADDR: storage:9100
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -52,6 +53,10 @@ services:
 
   storage:
     build: ./engine
+    environment:
+      ENGINE_SHARDS: "4"
+      ENGINE_MEMTABLE_MB: "8"
+      ENGINE_CACHE_MB: "64"
     volumes:
       - storage_data:/data
     restart: unless-stopped

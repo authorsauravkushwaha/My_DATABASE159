@@ -1,74 +1,17 @@
-# Implementation roadmap
+# Roadmap
 
-A milestone is complete only after its acceptance tests pass. The current code implements Milestone 0 and the scoped slice described below; it does not implement later checklist items.
+## Delivered in v0.1 – v0.2
 
-## Milestone 0 — foundation and secure vertical slice (current)
+- FastAPI control plane with organization, membership, project, collection, and record APIs.
+- Reversible Alembic migrations (`0001` initial control plane + `0002` high-capacity storage, `shard_key`, compression telemetry, and `record_field_indexes`).
+- Transparent `KZ1` Zlib record payload compression, online secondary B-tree field indexes, predicate-pushdown `/query`, O(1) keyset cursor pagination, atomic `/batch` writes (up to 5,000 records), and constant-memory streaming NDJSON `/import` & `/export`.
+- Sharded Go LSM storage engine (`ShardedStore`) with `KSS2` block-compressed SSTables, per-block CRC32 checksums, Bloom filters, shared LRU block cache, directory `flock`, binary batch WAL, and streaming k-way compaction.
+- Pooled Go HTTP data gateway supporting 512 KiB records, 5,000-op `/batch`, collection prefix purge, `/compact`, `/v1/stats`, and control-plane orphan cleanup (`STORAGE_ENGINE_ADDR`).
+- Dependency-free `@kestrel/client` SDK and Vue 3 dashboard with storage density telemetry, secondary index management, bulk ingestion, and server-side query builder.
 
-- [x] Inspect the empty repository; establish a distinct name, architecture, threat model, roadmap, and deployment notes.
-- [x] FastAPI + PostgreSQL-ready persistence, registration/login, organizations, owner role, projects, schema-validated JSON collections and CRUD.
-- [x] Project/organization membership enforcement and tests for cross-tenant denial.
-- [x] Compose local stack, non-root API image, CI lint/test/dependency audit.
-- [x] Versioned Alembic baseline, migration round-trip tests, and one-shot Compose migration job.
-- [ ] Review and exercise migration rollback/adoption on existing production-like databases.
-- [x] PostgreSQL-backed CI vertical-slice job (execution must be verified on GitHub Actions).
-- [ ] Full deployment smoke test and PostgreSQL concurrency/load coverage.
+## Next Milestones
 
-## Milestone 1 — harden identity and tenant boundary
-
-- Email verification, password-reset with single-use expiring tokens, generic auth responses, login/registration rate limits and abuse monitoring.
-- Refresh-token rotation/revocation, device/session management, MFA, OAuth/OIDC; secure cookie strategy for first-party dashboard.
-- Organization invitations, membership management, auditable role changes; explicit organization/project permission matrix.
-- PostgreSQL RLS policies and tests, distinct control-plane/data-plane credentials, API key lifecycle and secret redaction.
-- Threat-model review and external security review before public production use.
-
-## Milestone 2 — real database projects and generated APIs
-
-### Data plane MVP (implemented in this release)
-
-- LSM-tree storage engine in Go: write-ahead log, sorted SSTable runs, background flush, compaction that drops obsolete tombstones, crash recovery by WAL replay, served over a length-prefixed JSON TCP protocol.
-- Go HTTP data-plane gateway: authenticated record CRUD (GET/PUT/DELETE), collection listing, and prefix scan; every key is namespaced per project and collection so the gateway delegates each tenant access check to the control plane.
-- Docker Compose: `storage` and `gateway` services run beside PostgreSQL and the control-plane API.
-- CI: Go build, vet, and unit tests on every push and pull request.
-
-Remaining milestone work:
-
-- Provision isolated PostgreSQL database/schema and least-privilege credentials per project; connection pooling and quotas.
-- Migration DSL/CLI, schema introspection, relational tables, constraints, indexes, transactions, SQL editor with query timeout/cancel, safe export.
-- REST endpoints from schema with OpenAPI, filtering/sorting/pagination and RLS; disable-public-API control. API contract tests.
-- GraphQL only after authorization model parity and resource-cost limits.
-
-## Milestone 3 — operational correctness
-
-- Versioned migrations/rollbacks, structured logs, OpenTelemetry traces/metrics, readiness checks, alerting, audit log retention.
-- Encrypted scheduled backups separate from database infrastructure; integrity checks and documented, regularly exercised restore; measured RPO/RTO.
-- Quotas and usage metering based on actual measured work; no fabricated metrics or payment states.
-- PostgreSQL load/soak tests, migration-under-load tests, failure injection and incident response runbooks.
-
-## Milestone 4 — managed services
-
-- Realtime authorization and event delivery via logical replication/outbox; bounded queues, reconnect, backpressure, replay contract.
-- S3-compatible storage with private-by-default buckets, signed URL expiry, quotas, malware scanning integration.
-- Function deployment to isolated worker/sandbox with CPU/memory/time/concurrency limits; never evaluate user code in API process.
-- Python SDK and CLI, tested against actual APIs. The TypeScript control-plane client is implemented in `packages/client/`.
-
-## Milestone 5 — scale and enterprise capabilities
-
-- Read replicas, regional placement, failover, sharded control/data plane only when benchmarks show need.
-- KMS-backed encryption/key rotation, SSO/SCIM, compliance evidence, policy controls, data residency and auditable administrative access.
-- Billing/payment provider integration only after metering correctness, server-side signed webhook validation and idempotency.
-- Vector search using PostgreSQL extensions, permission-preserving semantic retrieval, AI SQL proposal reviewed and run under user's actual DB role.
-
-## Go/no-go gates
-
-Do not claim production readiness until PostgreSQL integration tests, security review, tenant isolation testing, backup restore drills, load/failure testing, operational alerting, migration rollback, incident procedures, and TLS/secrets deployment have been demonstrated. Maintain explicit limits and measured benchmarks for each release.
-
-
-## Milestone 0.2 — usable workspace and boundary hardening (implemented)
-
-- [x] Vue/TypeScript dashboard with real project/collection/record workflows and an explicitly labeled in-memory demo.
-- [x] Dependency-free TypeScript client, MDX guide, responsive CSS, JavaScript browser tests, and Shell setup/check scripts.
-- [x] Gateway membership/schema authorization through the control plane; raw public scan removed; bounded requests and network deadlines.
-- [x] Viewer write denial, collection deletion, readiness endpoint, and WAL/SSTable failure-path regression tests.
-- [x] Browser tests for demo CRUD, real API persistence after re-login, and mobile documentation navigation.
-- [ ] Unify control-plane and gateway record storage with transactional semantics and orphan cleanup.
-- [ ] Add PostgreSQL RLS, identity recovery/revocation/MFA, rate limits, audit logging, and managed backup/restore automation.
+1. **Multi-node replication**: Add WAL shipping and read-replica followers for the sharded Go LSM storage engine.
+2. **Access lifecycle**: Add refresh tokens with revocation, organization invitations, API keys with scoped permissions, and audit events.
+3. **PostgreSQL Row-Level Security & partitioning**: Pair `shard_key` hash partitioning with native PostgreSQL declarative partitions and optional RLS policies.
+4. **Operations**: Add Prometheus/OpenTelemetry metrics exporters, automated backup snapshots to S3-compatible object storage, and point-in-time restore drills.

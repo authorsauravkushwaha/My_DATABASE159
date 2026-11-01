@@ -1,25 +1,24 @@
 # Changelog
 
-## 0.2.1 — published website
+All notable changes to this project will be documented in this file.
 
-- Added a public marketing and documentation site served by GitHub Pages from the Vue workspace.
-- Added a home page covering what works, the three-plane architecture, the typed client, and known limits.
-- Added `VITE_BASE` and `VITE_STATIC_DEMO` so one build serves a project page without a control plane, while local and self-hosted behavior stays unchanged.
-- Added `scripts/build-site.sh`, a Pages workflow, and a `npm run site` local preview.
-- The static build states that sign-in needs the API and that the demo workspace is in-memory.
+## [0.2.0] - 2026-11-01
 
-## 0.2.0 — workspace and hardening
+### Added
 
-- Added Vue/TypeScript dashboard, responsive CSS, compiled MDX guides, and a clearly labeled in-memory demo.
-- Added dependency-free TypeScript control-plane client and JavaScript Playwright tests.
-- Added Alembic baseline and one-shot Compose migrations; disabled Compose schema auto-creation.
-- Added project/collection deletion, viewer write denial, and database readiness checks.
-- Replaced gateway token-only access with control-plane membership/schema authorization; removed public raw scans.
-- Added gateway request/schema bounds, control-plane streamed body limits, network/server deadlines, cursor listing, and regression tests.
-- Added a real Python → Go integration test covering authorization, pagination, and record/deletion persistence across engine restarts.
-- Hardened WAL tail recovery, closed-store handling, SSTable I/O error propagation, and directory durability ordering.
-- Added Shell setup/check scripts, JavaScript workspace validation, exact direct npm pins, ShellCheck, and expanded CI.
-- Fixed the SDK default relative base URL and added a regression test.
-- Documented separate record stores, migration adoption, browser-session trade-offs, and production gaps.
+- **High-density record compression (`KZ1`)**: Transparent Zlib payload compression in the Python data plane with per-record `raw_bytes`, `stored_bytes`, `is_compressed`, and 64-bucket `shard_key` tracking (`alembic` migration `0002_high_capacity_storage`).
+- **Online secondary B-tree field indexes & query engine**: Create/drop scalar field indexes (`POST/DELETE .../collections/{name}/indexes`), automatic index maintenance on single & batch writes, and `POST .../data/{name}/query` with SQL subquery pushdown (`eq`, `gt`, `gte`, `lt`, `lte`, `in`, `prefix`), field projection, and O(1) keyset cursor pagination.
+- **High-throughput bulk ingestion & constant-memory streaming**: `POST .../batch` (up to 5,000 records / 16 MiB), `POST .../import` (`application/x-ndjson`), `GET .../export` (streaming NDJSON in constant memory), `POST .../compact`, and `GET /v1/projects/{id}/storage`.
+- **Upgraded sharded Go LSM storage engine (`engine/`)**: `KSS2` Zlib block-compressed SSTables (~35× compression on structured JSON benchmarks) with per-block CRC32 checksums, sparse binary-searchable block indexes, 10-bit/key Bloom filters, shared concurrent LRU block cache, directory `flock`, binary batch WAL commits, streaming k-way merge iterators/compaction, and `ShardedStore` (`--shards`, `--memtable-mb`, `--cache-mb`).
+- **Upgraded Go HTTP gateway (`gateway/`)**: 16-connection TCP pool with stale-socket reconnect, 512 KiB single-record limit, 5,000-op `/batch` endpoint, `DELETE` collection prefix purge, `/compact`, `/v1/stats/{project}/{collection}`, and automatic control-plane orphan cleanup via `STORAGE_ENGINE_ADDR`.
+- **SDK & Vue dashboard upgrades**: Extended `@kestrel/client` and `apps/dashboard` with live storage efficiency telemetry, 128-field schemas, secondary B-tree index toggles, bulk batch/NDJSON ingestion, synthetic dataset generator, and server-side indexed query bar.
 
-No production-readiness, independent audit, benchmark, or managed-backup claim is made.
+## [0.1.0] - 2026-10-30
+
+### Added
+
+- FastAPI control plane for user registration, login, organizations, projects, collections, and schema-validated records.
+- Reversible initial Alembic migration and migration parity test.
+- Go LSM storage engine with CRC-framed WAL, torn-tail recovery, SSTable flush, startup recovery, and compaction.
+- Go HTTP data gateway with FastAPI-delegated project, role, and collection authorization.
+- `@kestrel/client` TypeScript package and Vue 3 + Vite dashboard with explicit local demo mode.

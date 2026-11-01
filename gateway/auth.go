@@ -18,6 +18,7 @@ type collectionSchema struct {
 		Type string `json:"type"`
 	} `json:"properties"`
 	Required             []string `json:"required"`
+	Indexes              []string `json:"indexes,omitempty"`
 	AdditionalProperties bool     `json:"additionalProperties"`
 }
 
@@ -70,8 +71,8 @@ func (a *authorizer) authorize(ctx context.Context, bearer, project, collection 
 		}
 		return grant, http.StatusServiceUnavailable, errors.New("authorization service unavailable")
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 32769))
-	if err != nil || len(body) > 32768 {
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 65537))
+	if err != nil || len(body) > 65536 {
 		return grant, http.StatusServiceUnavailable, errors.New("invalid authorization response")
 	}
 	if err := json.Unmarshal(body, &grant); err != nil || grant.ProjectID != project || grant.CollectionID != collection || grant.Schema.Type != "object" || grant.Schema.AdditionalProperties || grant.Schema.Properties == nil {
