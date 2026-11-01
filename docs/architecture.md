@@ -57,4 +57,26 @@ As capabilities arrive, expand into a modular monorepo: `apps/dashboard`, `servi
 - production should use managed secret storage, TLS, separate least-privilege service/database roles, network isolation, rate limiting and audit trails;
 - do not treat this MVP's application-level filters as a substitute for PostgreSQL RLS or isolated project credentials.
 
+## Data plane: storage engine and gateway
+
+The second service boundary is the data plane, implemented in Go and run
+alongside the control plane:
+
+- **storage engine** (`engine/`): a persistent LSM-tree key-value store. Writes
+  are fsync'd to a write-ahead log and a memory table before they become
+  visible; the memtable is periodically flushed to sorted SSTable runs on disk,
+  and compaction merges runs while dropping obsolete tombstones. After a crash,
+  the store reopens by replaying the WAL. Get/Set/Delete/Scan are served over
+  a length-prefixed JSON TCP protocol.
+- **gateway** (`gateway/`): an HTTP/JSON data API that authenticates every
+  request with the same `JWT_SECRET` as the control plane and namespaces every
+  stored key as `p:<hex(project)>:c:<hex(collection)>:r:<hex(record)>`. Because
+  keys are scoped by project and collection, cross-tenant reads are impossible
+  at the storage layer no matter who calls the gateway.
+
+The control plane (Python) owns authorization — who may touch which project —
+while the gateway owns authentication and key namespacing. Record CRUD is not
+yet delegated from the control plane to the data plane; that wiring is the next
+step after the storage plane is proven.
+
 Threats and remaining gaps are detailed in [../security/THREAT_MODEL.md](../security/THREAT_MODEL.md). The system is not represented as production-ready or independently audited.

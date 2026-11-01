@@ -28,5 +28,30 @@ services:
       - "8000:8000"
     restart: unless-stopped
 
+  # Storage plane: a persistent LSM-tree key/value engine (Go) serving records
+  # for projects and collections, exposed over a length-prefixed JSON protocol.
+  storage:
+    build: ./engine
+    volumes:
+      - storage_data:/data
+    restart: unless-stopped
+
+  # Data plane gateway: HTTP/JSON record API authenticated with the same
+  # JWT_SECRET as the control plane; keys are namespaced per project and
+  # collection so tenants can never read each other's records.
+  gateway:
+    build: ./gateway
+    environment:
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
+      # STORAGE_ADDR defaults to storage:9100 via the engine:9100 flag in the
+      # Dockerfile; override here to reach a remote engine.
+    depends_on:
+      storage:
+        condition: service_started
+    ports:
+      - "8100:8100"
+    restart: unless-stopped
+
 volumes:
   postgres_data:
+  storage_data:
