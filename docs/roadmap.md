@@ -21,6 +21,15 @@ A milestone is complete only after its acceptance tests pass. The current code i
 
 ## Milestone 2 — real database projects and generated APIs
 
+### Data plane MVP (implemented in this release)
+
+- LSM-tree storage engine in Go: write-ahead log, sorted SSTable runs, background flush, compaction that drops obsolete tombstones, crash recovery by WAL replay, served over a length-prefixed JSON TCP protocol.
+- Go HTTP data-plane gateway: authenticated record CRUD (GET/PUT/DELETE), collection listing, and prefix scan; every key is namespaced per project and collection so cross-tenant reads are impossible at the storage layer.
+- Docker Compose: `storage` and `gateway` services run beside PostgreSQL and the control-plane API.
+- CI: Go build, vet, and unit tests on every push and pull request.
+
+Remaining milestone work:
+
 - Provision isolated PostgreSQL database/schema and least-privilege credentials per project; connection pooling and quotas.
 - Migration DSL/CLI, schema introspection, relational tables, constraints, indexes, transactions, SQL editor with query timeout/cancel, safe export.
 - REST endpoints from schema with OpenAPI, filtering/sorting/pagination and RLS; disable-public-API control. API contract tests.
