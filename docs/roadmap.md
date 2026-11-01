@@ -8,8 +8,10 @@ A milestone is complete only after its acceptance tests pass. The current code i
 - [x] FastAPI + PostgreSQL-ready persistence, registration/login, organizations, owner role, projects, schema-validated JSON collections and CRUD.
 - [x] Project/organization membership enforcement and tests for cross-tenant denial.
 - [x] Compose local stack, non-root API image, CI lint/test/dependency audit.
-- [ ] Replace development `create_all` with versioned Alembic migrations and production migration workflow.
-- [ ] Add PostgreSQL-backed CI integration tests and deployment smoke test.
+- [x] Versioned Alembic baseline, migration round-trip tests, and one-shot Compose migration job.
+- [ ] Review and exercise migration rollback/adoption on existing production-like databases.
+- [x] PostgreSQL-backed CI vertical-slice job (execution must be verified on GitHub Actions).
+- [ ] Full deployment smoke test and PostgreSQL concurrency/load coverage.
 
 ## Milestone 1 — harden identity and tenant boundary
 
@@ -24,7 +26,7 @@ A milestone is complete only after its acceptance tests pass. The current code i
 ### Data plane MVP (implemented in this release)
 
 - LSM-tree storage engine in Go: write-ahead log, sorted SSTable runs, background flush, compaction that drops obsolete tombstones, crash recovery by WAL replay, served over a length-prefixed JSON TCP protocol.
-- Go HTTP data-plane gateway: authenticated record CRUD (GET/PUT/DELETE), collection listing, and prefix scan; every key is namespaced per project and collection so cross-tenant reads are impossible at the storage layer.
+- Go HTTP data-plane gateway: authenticated record CRUD (GET/PUT/DELETE), collection listing, and prefix scan; every key is namespaced per project and collection so the gateway delegates each tenant access check to the control plane.
 - Docker Compose: `storage` and `gateway` services run beside PostgreSQL and the control-plane API.
 - CI: Go build, vet, and unit tests on every push and pull request.
 
@@ -47,7 +49,7 @@ Remaining milestone work:
 - Realtime authorization and event delivery via logical replication/outbox; bounded queues, reconnect, backpressure, replay contract.
 - S3-compatible storage with private-by-default buckets, signed URL expiry, quotas, malware scanning integration.
 - Function deployment to isolated worker/sandbox with CPU/memory/time/concurrency limits; never evaluate user code in API process.
-- JavaScript/TypeScript and Python SDKs plus CLI, each tested against actual APIs.
+- Python SDK and CLI, tested against actual APIs. The TypeScript control-plane client is implemented in `packages/client/`.
 
 ## Milestone 5 — scale and enterprise capabilities
 
@@ -59,3 +61,14 @@ Remaining milestone work:
 ## Go/no-go gates
 
 Do not claim production readiness until PostgreSQL integration tests, security review, tenant isolation testing, backup restore drills, load/failure testing, operational alerting, migration rollback, incident procedures, and TLS/secrets deployment have been demonstrated. Maintain explicit limits and measured benchmarks for each release.
+
+
+## Milestone 0.2 — usable workspace and boundary hardening (implemented)
+
+- [x] Vue/TypeScript dashboard with real project/collection/record workflows and an explicitly labeled in-memory demo.
+- [x] Dependency-free TypeScript client, MDX guide, responsive CSS, JavaScript browser tests, and Shell setup/check scripts.
+- [x] Gateway membership/schema authorization through the control plane; raw public scan removed; bounded requests and network deadlines.
+- [x] Viewer write denial, collection deletion, readiness endpoint, and WAL/SSTable failure-path regression tests.
+- [x] Browser tests for demo CRUD, real API persistence after re-login, and mobile documentation navigation.
+- [ ] Unify control-plane and gateway record storage with transactional semantics and orphan cleanup.
+- [ ] Add PostgreSQL RLS, identity recovery/revocation/MFA, rate limits, audit logging, and managed backup/restore automation.

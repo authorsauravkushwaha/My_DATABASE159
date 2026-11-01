@@ -1,31 +1,59 @@
-# Security threat model (initial)
+# Security threat model
 
-## Scope and assets
+This is an initial engineering model, not an audit or compliance certification. Scope: browser dashboard, TypeScript client, Python control plane, PostgreSQL/SQLite metadata and records, Go gateway/engine, and local deployment configuration.
 
-Assets: account emails/password verifiers, bearer tokens, organization/project metadata, collection schemas, JSON records, database credentials, signing keys, and service availability. Trust boundaries: internet client to API; API to PostgreSQL; future deployment operator to host/secret manager. This is a lightweight initial model, not a security audit or compliance assessment.
+## Trust boundaries
 
-## Threat actors and main risks
+1. Browser/client → same-origin dashboard proxy → control plane.
+2. Client → gateway → control-plane authorization → private engine.
+3. Services → database and persistent volumes.
+4. Operator/CI → source, dependencies, migrations, and signing/database secrets.
 
-| Threat | Current mitigations | Remaining risk / required work |
+A project ID, collection ID, key prefix, or valid token signature is not itself permission to access data.
+
+## Main risks and current treatment
+
+| Threat | Implemented mitigation | Material remaining gap |
 |---|---|---|
-| Cross-tenant IDOR | authenticated membership lookup; project and collection predicates in data queries; tests return 404 for unauthorized tenant | App-layer bug could expose data. No PostgreSQL RLS, independent DB credentials, fuzz/property tests, or formal review yet. |
-| Credential stuffing/brute force | PBKDF2-HMAC-SHA256, random salt, 600,000 iterations; generic login failure | No rate limiting, MFA, verification, breached-password check, or account recovery. Add edge and application limits before public exposure. |
-| Token theft/replay | HS256 signature, 15-minute expiry, key length requirement | No refresh rotation/revocation, device-bound session, sender constraint, or secure browser session; secret rotation invalidates all tokens. |
-| SQL injection | SQLAlchemy parameterized queries; no client SQL execution; collection/property names constrained | Database role isolation and query time/resource limits absent. Audit future dynamic SQL and migration code. |
-| Malicious JSON / resource exhaustion | schema field limits, property type checks, record limit 64 KiB, page size max 100 | No streaming/request-body limit, rate/concurrency quotas, DB statement timeout or DDoS service. Enforce limits at proxy and application. |
-| Secret leakage | no real credentials committed; `.env` ignored; env-driven signing key; no database port published in compose | Dev compose is not a hardened production topology; logs/CI/deploy secrets still need review and secret scanning. |
-| Database compromise | PostgreSQL password supplied by environment; API container runs non-root | Single DB trust domain, no encryption/KMS/rotation, network segmentation, external backups or least-privilege runtime role. |
-| Stored XSS / unsafe rendering | API returns JSON; no dashboard yet | Any future UI must encode output, use CSP, CSRF defenses and secure cookies. |
-| Dependency/supply-chain compromise | CI runs dependency audit and lint/tests | CI actions use major tags, no signed build provenance/container scanning/SBOM. Pin actions and add scanners before release. |
+| Cross-tenant IDOR | Membership lookup; project/collection predicates; gateway delegates every access check using the caller token; regression tests | No PostgreSQL RLS or independent per-project DB roles; application bugs remain possible |
+| Privilege escalation | Owner/admin project management; owner/admin/editor data writes; viewer read-only; gateway requests write grants | No invitation/membership-management UI, audit trail, MFA, or formal external review |
+| Credential attacks | PBKDF2-HMAC-SHA256, random salt, 600,000 iterations; generic login failure; minimum password length | No application/edge rate limit, breached-password check, verified email, recovery, or MFA |
+| Token theft/replay | HS256, required claims, 15-minute expiry; dashboard memory-only token; clear on sign-out/expiry | No revocation/refresh rotation/device binding; XSS can steal in-memory tokens; reload requires sign-in |
+| SQL injection | Parameterized SQLAlchemy operations; no client SQL; constrained names | Future migration/dynamic-query code needs review; DB runtime privileges are not minimized yet |
+| Malicious JSON | Closed flat schemas, type/required checks on both write paths, 64 KiB records, bounded pages | Control-plane bodies are bounded to 128 KiB, including streamed requests; edge concurrency/rate limits are still needed; nested object/array cost is not separately bounded; engine scans merge the full prefix before applying the result limit, so storage memory/cost quotas remain future work |
+| Gateway bypass | No public raw scan; control-plane identity/membership/schema check before storage; fail-closed timeouts; key identity verification | Shared control-plane availability dependency; separate stores and orphan cleanup unresolved |
+| Storage corruption/crash | WAL CRC and fsync; incomplete-tail trimming; corrupt complete-frame rejection; SSTable directory sync before WAL truncation; I/O error propagation | No SSTable checksums, multi-process ownership lock, replication, or demonstrated storage-device failure recovery |
+| Browser XSS | Vue text escaping; no user HTML/MDX evaluation; compiled trusted MDX; restrictive Nginx CSP; no remote fonts/scripts | CSP includes `style-src 'unsafe-inline'`; dependency compromise and development-server exposure remain risks |
+| Secret leakage | `.env` and preview secrets ignored; random setup; no gateway signing-secret copy; no credentials in SDK storage | No managed secret store/rotation; deployment logs and backups need operator review |
+| Supply chain | Exact direct npm versions and lockfile; `npm ci`; npm/pip audits; CI tests | Actions use major tags; no signed provenance/SBOM or independent dependency review |
 
-## Security behavior and assumptions
+## Authorization contract
 
-- Tokens should be sent only over TLS in non-local environments; TLS termination and certificate management are deployment responsibilities and are not included.
-- `JWT_SECRET` must be generated randomly and stored outside Git. Do not use `.env.example` values. Database secret must also be unique.
-- The API `AUTO_CREATE_SCHEMA` option is for development only. Production requires reviewed migrations and a restricted runtime DB user.
-- Collections use JSON storage and are not a secure boundary for sensitive column-level access; the MVP currently has no per-record or per-field policy system.
-- No claim of being fully secure is made. Before production, conduct independent review, penetration testing, dependency/container scanning, restore and incident exercises.
+The gateway calls:
 
-## Reporting
+`GET /v1/projects/{project}/collections/{collection_uuid}/access?write=true|false`
 
-Please report suspected vulnerabilities privately using the process in [../SECURITY.md](../SECURITY.md). Avoid publishing exploit details before a fix is available.
+It forwards the original bearer token. The control plane authenticates the user, checks organization membership, project API state, collection ownership, and requested write role. The gateway validates the returned IDs and schema, then accesses only the corresponding namespaced key. Authorization failures are not converted into successful empty results. Service/network failures return 503.
+
+The endpoint is not a secret bypass: without an authorized caller token it reveals no collection access. Network isolation and edge limits are still recommended.
+
+## Browser session decision
+
+The dashboard intentionally does not put bearer tokens in localStorage or sessionStorage. This reduces persistent token exposure but is not XSS protection and does not survive a reload. A future first-party cookie/session design needs CSRF defenses, secure cookie attributes, rotation, and revocation; it must not be represented as already implemented.
+
+The interactive demo is a separate in-memory adapter. It sends no record CRUD to the API and displays a persistent demo banner. Its sample records are not real service data or usage metrics.
+
+## Deployment assumptions
+
+- TLS and trusted ingress are required outside localhost.
+- PostgreSQL and engine networking stay private; the engine protocol has no authentication.
+- Unique random secrets, least-privilege DB roles, edge request/rate limits, monitoring, and backups are operator responsibilities.
+- Development Compose is not a hardened production topology.
+- `/ready` is a database connectivity check, not a security or full-dependency attestation.
+- Control-plane and gateway records are separate. Deleting one does not erase the other.
+
+## Go/no-go
+
+Do not claim production readiness until PostgreSQL integration and isolation tests, identity hardening, rate limits, RLS/role review, backup restore drills, crash/load/failure tests, migration rollback exercises, alerting, TLS/secrets deployment, and independent review are demonstrated.
+
+Report vulnerabilities using [SECURITY.md](../SECURITY.md). Never include real credentials or customer data in a public report.

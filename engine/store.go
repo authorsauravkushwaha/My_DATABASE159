@@ -40,7 +40,7 @@ type LSMStore struct {
 // Open creates or recovers a store in dir. The WAL is replayed into the
 // memtable and every existing SSTable run is loaded.
 func Open(dir string) (*LSMStore, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 	wal, err := openWAL(filepath.Join(dir, "wal.log"))
@@ -72,6 +72,15 @@ func Open(dir string) (*LSMStore, error) {
 		}
 	}
 	return s, nil
+}
+
+func syncDir(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func loadRuns(dir string) ([]*SSTable, uint64, error) {
@@ -114,11 +123,17 @@ func loadRuns(dir string) ([]*SSTable, uint64, error) {
 // Set durably stores key -> value. The write is fsync'd to the WAL before it
 // becomes visible.
 func (s *LSMStore) Set(key, value []byte) error {
-	if len(key) == 0 {
-		return errors.New("empty key")
+	if len(key) == 0 || len(key) > 4096 {
+		return errors.New("key must be 1–4096 bytes")
+	}
+	if len(value) > 16<<20 {
+		return errors.New("value exceeds 16 MiB")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("store is closed")
+	}
 	if err := s.wal.Append(walSetOp, string(key), string(value)); err != nil {
 		return err
 	}
@@ -131,11 +146,14 @@ func (s *LSMStore) Set(key, value []byte) error {
 
 // Delete marks key as deleted. The tombstone is durable once this returns.
 func (s *LSMStore) Delete(key []byte) error {
-	if len(key) == 0 {
-		return errors.New("empty key")
+	if len(key) == 0 || len(key) > 4096 {
+		return errors.New("key must be 1–4096 bytes")
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("store is closed")
+	}
 	if err := s.wal.Append(walDelOp, string(key), ""); err != nil {
 		return err
 	}
@@ -151,6 +169,9 @@ func (s *LSMStore) Delete(key []byte) error {
 func (s *LSMStore) Get(key string) ([]byte, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.closed {
+		return nil, false, errors.New("store is closed")
+	}
 	if value, deleted, ok := s.mem.Get(key); ok {
 		if deleted {
 			return nil, false, errNotFound
@@ -158,7 +179,11 @@ func (s *LSMStore) Get(key string) ([]byte, bool, error) {
 		return value, true, nil
 	}
 	for i := 0; i < len(s.runs); i++ {
-		if value, deleted, ok := s.runs[i].get(key); ok {
+		value, deleted, ok, err := s.runs[i].get(key)
+		if err != nil {
+			return nil, false, err
+		}
+		if ok {
 			if deleted {
 				return nil, false, errNotFound
 			}
@@ -173,35 +198,41 @@ func (s *LSMStore) Get(key string) ([]byte, bool, error) {
 // older ones across runs and the memtable; a set always resurrects a key
 // that an older run tombstoned. A limit of 0 means no limit.
 func (s *LSMStore) Scan(prefix string, limit int) ([]KVPair, error) {
+	return s.ScanAfter(prefix, "", limit)
+}
+
+// ScanAfter excludes keys <= after, while retaining the namespace prefix.
+func (s *LSMStore) ScanAfter(prefix, after string, limit int) ([]KVPair, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.closed {
+		return nil, errors.New("store is closed")
+	}
 	merged := make(map[string][]byte)
-	deleted := make(map[string]bool)
 	for i := len(s.runs) - 1; i >= 0; i-- {
 		entries, err := s.runs[i].scanPrefix(prefix)
 		if err != nil {
 			return nil, err
 		}
 		for _, e := range entries {
+			if e.key <= after {
+				continue
+			}
 			if e.op == walDelOp {
 				delete(merged, e.key)
-				deleted[e.key] = true
 			} else {
 				merged[e.key] = e.value
-				delete(deleted, e.key)
 			}
 		}
 	}
 	for k, v := range s.mem.Snapshot() {
-		if !strings.HasPrefix(k, prefix) {
+		if !strings.HasPrefix(k, prefix) || k <= after {
 			continue
 		}
 		if v.deleted {
 			delete(merged, k)
-			deleted[k] = true
 		} else {
 			merged[k] = v.value
-			delete(deleted, k)
 		}
 	}
 	keys := make([]string, 0, len(merged))
@@ -256,6 +287,9 @@ func (s *LSMStore) flushLocked() error {
 func (s *LSMStore) Compact() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return errors.New("store is closed")
+	}
 	merged := make(map[string]memEntry)
 	for i := len(s.runs) - 1; i >= 0; i-- {
 		entries, err := s.runs[i].allEntries()
@@ -290,9 +324,14 @@ func (s *LSMStore) Compact() error {
 		return err
 	}
 	for _, old := range s.runs {
-		os.Remove(old.path) // best effort: old files are superseded
+		if err := os.Remove(old.path); err != nil {
+			return err
+		}
 	}
 	s.runs = []*SSTable{run}
+	if err := syncDir(s.dir); err != nil {
+		return err
+	}
 	if err := s.wal.Truncate(); err != nil {
 		return err
 	}

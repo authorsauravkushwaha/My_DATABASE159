@@ -1,0 +1,33 @@
+# Secure boundaries, honestly stated
+
+Security is a process, not a badge. Kestrel has useful safeguards and explicit gaps. Do not store regulated or sensitive production data without an independent review and operational hardening.
+
+## Implemented safeguards
+
+- Salted PBKDF2-HMAC-SHA256 password hashes with 600,000 iterations.
+- Signed bearer tokens with a 15-minute lifetime and a required secret of at least 32 characters.
+- Organization membership checks and project/collection-scoped queries.
+- Write-role enforcement for editors, admins, and owners; viewers are read-only.
+- Gateway authorization through the control plane, with no public raw-key scan endpoint.
+- Validated schemas, bounded record sizes, bounded pages, and parameterized database queries.
+- Tokens kept in memory by the dashboard, not local storage or session storage.
+
+## Browser session trade-off
+
+Memory-only token storage reduces persistent token exposure but does not protect against JavaScript execution in the page. A refresh signs you out. There is no refresh-token rotation, MFA, password recovery, or email verification yet. Deploy a restrictive CSP, trusted dependencies, and TLS.
+
+## Tenant isolation
+
+A project ID is not a permission. The control plane checks membership before returning project data. The gateway forwards the caller's token to the control-plane access check and fails closed if that check is unavailable. Keys are namespaced, but namespacing alone is not authorization.
+
+Application-level isolation is not PostgreSQL row-level security. There are no per-project database credentials or per-record policies yet.
+
+## Operational responsibilities
+
+Use unique random secrets, private service networking, least-privilege database roles, edge rate limits, request-size limits, monitoring, and tested encrypted backups. `/ready` checks database connectivity; it is not a full dependency or storage-readiness check.
+
+The Go storage engine is experimental. Its crash recovery and compaction are not a substitute for a backup and restore plan. The dashboard's JSON export is not a backup.
+
+## Report a vulnerability
+
+Follow the repository's `SECURITY.md` process. Do not include real credentials or customer data in a public issue.

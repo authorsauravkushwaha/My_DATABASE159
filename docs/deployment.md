@@ -1,32 +1,88 @@
-# Deployment and local operations
+# Deployment and operations
 
 ## Local Compose
 
-1. Install Docker Engine and Compose v2.
-2. Copy `.env.example` to `.env`; generate independent high-entropy values for `JWT_SECRET` and `POSTGRES_PASSWORD` (for example, `python -c 'import secrets; print(secrets.token_urlsafe(48))'`).
-3. Run `docker compose up --build` and visit `http://localhost:8000/docs`.
-4. Stop with `docker compose down`. `docker compose down -v` also destroys the local database volume; use only when you intend to erase local data.
-
-PostgreSQL is not published to the host. The compose API port is published for local use. The example intentionally enables `AUTO_CREATE_SCHEMA` only for local development.
-
-## Production is not turnkey yet
-
-This repository does not include a production deployment workflow, TLS reverse proxy, managed secret store, migration runner, encrypted backup service, monitoring stack, HA, or automated restore. Do not expose this compose configuration directly to the internet. A first production deployment should use a private PostgreSQL endpoint, managed secrets, TLS ingress, firewall/network rules, non-development schema migrations, backups stored separately, monitoring, restricted database credentials, and tested restore/rollback procedures. The repo has no operational evidence for RPO/RTO or production performance targets yet.
-
-## Python development
-
 ```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install -r requirements-dev.txt
-export DATABASE_URL='postgresql+psycopg://user:password@localhost:5432/kestrel'
-export JWT_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
-export AUTO_CREATE_SCHEMA=true
-uvicorn app.main:app --reload
+bash scripts/setup.sh
+docker compose up --build
 ```
 
-For quick tests, pytest uses an isolated in-memory SQLite database and does not need PostgreSQL. A PostgreSQL integration test job remains an explicit roadmap item. Keep production and development credentials/data separate.
+Open `http://localhost:3000`. The API is bound to `127.0.0.1:8000`; the gateway to `127.0.0.1:8100`. PostgreSQL and the raw engine have no published host ports. The dashboard container runs Nginx as a non-root user on port 8080.
 
-## Health and observability
+The `migrate` service runs `alembic upgrade head` and must finish successfully before the API starts. `AUTO_CREATE_SCHEMA` is false. `setup.sh` installs local development dependencies and generates `.env` with independent random secrets. If you only need containers, you may instead copy `.env.example` and fill both values with unique high-entropy secrets.
 
-`GET /health` reports process liveness only. It does not test database readiness or dependency health. Structured logs, OpenTelemetry, metrics, alerting, query statistics, audit log storage, and dashboards have not been implemented; do not infer service health from missing telemetry.
+Do not use example/empty secrets. Do not expose this development topology directly to the internet. The dashboard's CSP allows same-origin API requests; it does not require permissive CORS.
+
+## Database migrations
+
+Always back up and test a migration on a copy before applying it to real data.
+
+```bash
+export DATABASE_URL='postgresql+psycopg://user:password@private-db:5432/kestrel'
+.venv/bin/alembic upgrade head
+.venv/bin/alembic check
+```
+
+For model changes, generate a reviewed migration:
+
+```bash
+.venv/bin/alembic revision --autogenerate -m 'describe the change'
+# Review every operation, especially drops, type changes, and constraints.
+.venv/bin/alembic upgrade head
+```
+
+CI tests upgrade → model comparison → downgrade → upgrade on SQLite and runs a PostgreSQL vertical-slice test after migrations. A downgrade can destroy data; it is not an automatic production rollback strategy.
+
+### Existing pre-migration database
+
+The initial repository used `create_all` without an Alembic version table. **Do not run the initial migration blindly over those existing tables.** Back up the database, compare its actual schema and constraints with revision `0001`, reconcile differences manually, and only then stamp the verified baseline:
+
+```bash
+# ONLY after verifying that the existing schema exactly matches revision 0001.
+.venv/bin/alembic stamp 0001
+.venv/bin/alembic upgrade head
+```
+
+Stamping records a version; it does not repair a schema. Keep `AUTO_CREATE_SCHEMA=false` outside tests.
+
+## Development without Docker
+
+```bash
+bash scripts/setup.sh
+bash scripts/dev.sh
+```
+
+This uses SQLite under `.kestrel/`, applies migrations, starts FastAPI on port 8000, and Vite on port 5173. It does not start the separate Go services. The live demo adapter needs no backend at all.
+
+## Browser tests
+
+```bash
+npx playwright install chromium
+npm run test:e2e
+```
+
+Playwright starts the API and dashboard if needed. `CHROMIUM_EXECUTABLE_PATH` can point to an existing compatible Chromium binary. Tests create disposable accounts/records in `.kestrel/e2e.db`; never point the test server at production. CI installs Chromium and uploads failure traces.
+
+## Health and shutdown
+
+- API `/health`: process liveness only.
+- API `/ready`: executes `SELECT 1`; does not verify migrations or Go dependencies.
+- Gateway `/health`: process liveness only, not authorization/storage readiness.
+- Dashboard container: checks its static entry page.
+- Gateway handles SIGTERM with a bounded graceful shutdown.
+
+The engine's TCP protocol is private and unauthenticated. Never publish port 9100. Run exactly one engine process per data directory; multi-process ownership locking is not implemented.
+
+## Backups and destructive operations
+
+No automated backup service is included. Use PostgreSQL-native backup/PITR tooling and separate encrypted storage. Back up the Go data directory only with a consistent snapshot or after a clean engine shutdown. Test restores regularly.
+
+Dashboard JSON export is **one page**, not a backup. Deleting a project/collection cascades only control-plane records. Go-engine records are separate and are not automatically removed. Plan orphan cleanup before unified storage is implemented.
+
+`docker compose down` preserves named volumes. `docker compose down -v` destroys them.
+
+## Production gates—not included yet
+
+Before public production use, provide TLS ingress, managed secrets and rotation, least-privilege DB roles, PostgreSQL RLS, edge rate/concurrency/body limits, identity recovery/MFA/session revocation, audit logs, metrics/alerting, quotas, encrypted backups, restore drills, migration rollback exercises, dependency/container scanning, and independent security review.
+
+The Go engine remains experimental: no full SSTable checksum validation, multi-process lock, replication, or measured crash/load guarantees. No production RPO/RTO, availability, or performance claim is made.

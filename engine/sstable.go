@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"os"
+	"path/filepath"
 	"sort"
 )
 
@@ -49,7 +50,7 @@ func buildSSTable(path string, entries []sstableEntry) (*SSTable, error) {
 	entries = deduped
 
 	tmp := path + ".tmp"
-	f, err := os.Create(tmp)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -119,6 +120,9 @@ func buildSSTable(path string, entries []sstableEntry) (*SSTable, error) {
 	if err := os.Rename(tmp, path); err != nil {
 		return nil, err
 	}
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return nil, err
+	}
 	return &SSTable{path: path, index: index}, nil
 }
 
@@ -180,52 +184,55 @@ func openSSTable(path string) (*SSTable, error) {
 		pos += int(klen) + 8
 	}
 	sort.Slice(index, func(i, j int) bool { return index[i].key < index[j].key })
+	if err := syncDir(filepath.Dir(path)); err != nil {
+		return nil, err
+	}
 	return &SSTable{path: path, index: index}, nil
 }
 
 // get returns the entry for key, or (nil, false, false) when absent. A
 // tombstone is reported as deleted=true.
-func (s *SSTable) get(key string) (value []byte, deleted bool, ok bool) {
+func (s *SSTable) get(key string) (value []byte, deleted bool, ok bool, err error) {
 	i := sort.Search(len(s.index), func(i int) bool {
 		return s.index[i].key >= key
 	})
 	if i == len(s.index) || s.index[i].key != key {
-		return nil, false, false
+		return nil, false, false, nil
 	}
 	offset := int64(s.index[i].offset)
 
-	f, err := os.Open(s.path)
-	if err != nil {
-		return nil, false, false
+	f, openErr := os.Open(s.path)
+	if openErr != nil {
+		return nil, false, false, openErr
 	}
 	defer f.Close()
 
 	header := make([]byte, 5)
 	if err := readAt(f, header, offset); err != nil {
-		return nil, false, false
+		return nil, false, false, err
 	}
 	op := header[0]
 	klen := binary.BigEndian.Uint32(header[1:5])
 	keyBuf := make([]byte, klen)
 	if err := readAt(f, keyBuf, offset+5); err != nil {
-		return nil, false, false
+		return nil, false, false, err
 	}
 	if string(keyBuf) != key {
-		return nil, false, false
+		return nil, false, false, errors.New("sstable key mismatch")
 	}
 	vlenBuf := make([]byte, 4)
 	if err := readAt(f, vlenBuf, offset+5+int64(klen)); err != nil {
-		return nil, false, false
+		return nil, false, false, err
 	}
 	vlen := binary.BigEndian.Uint32(vlenBuf)
 	if op == walDelOp || vlen == 0xFFFFFFFF {
-		return nil, true, true
+		return nil, true, true, nil
 	}
 	value = make([]byte, vlen)
 	if err := readAt(f, value, offset+5+int64(klen)+4); err != nil {
-		return nil, false, false
+		return nil, false, false, err
 	}
-	return value, false, true
+	return value, false, true, nil
 }
 
 // scanPrefix returns every entry whose key has the given prefix, in key order.

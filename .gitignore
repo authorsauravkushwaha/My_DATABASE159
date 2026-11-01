@@ -15,3 +15,11 @@ htmlcov/
 data/
 *.sst
 wal.log
+node_modules/
+dist/
+coverage/
+.playwright/
+test-results/
+playwright-report/
+*.tsbuildinfo
+.kestrel/

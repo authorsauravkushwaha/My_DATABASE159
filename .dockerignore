@@ -1,0 +1,13 @@
+.git
+.venv
+node_modules
+**/node_modules
+**/dist
+.env
+.env.*
+*.db
+.kestrel
+.coverage
+.pytest_cache
+.ruff_cache
+test-results

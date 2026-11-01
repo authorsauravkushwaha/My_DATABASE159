@@ -1,0 +1,35 @@
+{
+  "name": "kestrel",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/dashboard",
+    "packages/client"
+  ],
+  "engines": {
+    "node": ">=22.12",
+    "npm": ">=10"
+  },
+  "scripts": {
+    "dev": "npm run build -w @kestrel/client && npm run dev -w @kestrel/dashboard",
+    "build": "npm run build -w @kestrel/client && npm run build -w @kestrel/dashboard",
+    "typecheck": "npm run build -w @kestrel/client && npm run typecheck --workspaces",
+    "test": "npm run build -w @kestrel/client && npm run test --workspaces",
+    "lint": "eslint .",
+    "check:workspace": "node scripts/check-workspace.mjs",
+    "check": "bash scripts/check.sh",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.64.1",
+    "eslint": "10.14.0",
+    "eslint-plugin-vue": "10.12.0",
+    "globals": "17.14.0",
+    "typescript-eslint": "8.72.1"
+  },
+  "overrides": {
+    "minimatch": "11.0.3"
+  }
+}

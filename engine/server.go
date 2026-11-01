@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"time"
 )
 
 const maxFrameSize = 16 << 20 // 16 MiB
@@ -16,21 +17,23 @@ type frameReq struct {
 	Key    string `json:"key"`
 	Value  string `json:"value,omitempty"`
 	Prefix string `json:"prefix,omitempty"`
+	After  string `json:"after,omitempty"`
 	Limit  int    `json:"limit,omitempty"`
 }
 
 // frameResp is one server response.
 type frameResp struct {
-	OK   bool     `json:"ok,omitempty"`
-	Value string  `json:"value,omitempty"`
+	OK    bool     `json:"ok,omitempty"`
+	Value string   `json:"value,omitempty"`
 	KVs   []KVPair `json:"kvs,omitempty"`
-	Error string  `json:"error,omitempty"`
+	Error string   `json:"error,omitempty"`
 }
 
 // serveConn handles one client connection: read frames, execute store ops,
 // write response frames, until the connection closes.
 func (s *LSMStore) serveConn(conn net.Conn) {
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	header := make([]byte, 4)
 	for {
 		if _, err := io.ReadFull(conn, header); err != nil {
@@ -76,7 +79,7 @@ func (s *LSMStore) handleReq(req frameReq) frameResp {
 		}
 		return frameResp{OK: true, Value: string(value)}
 	case "scan":
-		kvs, err := s.Scan(req.Prefix, req.Limit)
+		kvs, err := s.ScanAfter(req.Prefix, req.After, req.Limit)
 		if err != nil {
 			return frameResp{Error: err.Error()}
 		}
@@ -111,6 +114,7 @@ func (s *LSMStore) Serve(addr string) error {
 		if err != nil {
 			return err
 		}
+		_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 		go s.serveConn(conn)
 	}
 }

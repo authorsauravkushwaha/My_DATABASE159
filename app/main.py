@@ -5,15 +5,17 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db import Base, engine, get_session
+from app.middleware import RequestBodyLimitMiddleware
 from app.models import Collection, Membership, Organization, Project, Record, User
 from app.schemas import (
     CollectionCreate,
     CollectionResponse,
+    DataAccessResponse,
     LoginRequest,
     ProjectCreate,
     ProjectResponse,
@@ -46,9 +48,12 @@ async def lifespan(_: FastAPI):
 app = FastAPI(
     title="Kestrel Platform API",
     description="Tenant-aware database platform MVP. This API manages projects and validated JSON collections; it does not execute client SQL.",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
+
+
+app.add_middleware(RequestBodyLimitMiddleware)
 
 
 @app.middleware("http")
@@ -66,6 +71,15 @@ async def security_headers(request, call_next):
 @app.get("/health", tags=["operations"])
 def health():
     return {"status": "ok", "service": "kestrel-api"}
+
+
+@app.get("/ready", tags=["operations"])
+def ready(session: Session = Depends(get_session)):
+    try:
+        session.execute(text("SELECT 1"))
+    except Exception:
+        raise HTTPException(status_code=503, detail="Database is not ready")
+    return {"status": "ok", "database": "ready"}
 
 
 @app.post("/v1/auth/register", response_model=TokenResponse, status_code=201, tags=["authentication"])
@@ -232,6 +246,12 @@ def get_collection(project: Project, name: str, session: Session) -> Collection:
     return collection
 
 
+def require_project_role(project: Project, user: User, session: Session, write: bool = False) -> None:
+    membership = require_membership(session, user.id, project.organization_id)
+    if write and membership.role not in {"owner", "admin", "editor"}:
+        raise HTTPException(status_code=403, detail="Project write role required")
+
+
 def require_api_enabled(project: Project) -> None:
     if not project.api_enabled:
         raise HTTPException(status_code=403, detail="The project data API is disabled")
@@ -240,6 +260,7 @@ def require_api_enabled(project: Project) -> None:
 @app.post("/v1/projects/{project_id}/collections", response_model=CollectionResponse, status_code=201, tags=["collections"])
 def create_collection(project_id: str, body: CollectionCreate, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
     project = get_authorized_project(project_id, user, session)
+    require_project_role(project, user, session, write=True)
     require_api_enabled(project)
     collection = Collection(project_id=project.id, name=body.name, schema_json=normalize_schema(body.collection_definition))
     session.add(collection)
@@ -263,6 +284,7 @@ def list_collections(project_id: str, user: User = Depends(get_current_user), se
 @app.post("/v1/projects/{project_id}/data/{collection_name}", response_model=RecordResponse, status_code=201, tags=["data"])
 def create_record(project_id: str, collection_name: str, body: RecordCreate, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
     project = get_authorized_project(project_id, user, session)
+    require_project_role(project, user, session, write=True)
     require_api_enabled(project)
     collection = get_collection(project, collection_name, session)
     validate_record(collection, body.data)
@@ -285,6 +307,7 @@ def list_records(project_id: str, collection_name: str, limit: int = Query(50, g
 @app.patch("/v1/projects/{project_id}/data/{collection_name}/{record_id}", response_model=RecordResponse, tags=["data"])
 def update_record(project_id: str, collection_name: str, record_id: str, body: RecordUpdate, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
     project = get_authorized_project(project_id, user, session)
+    require_project_role(project, user, session, write=True)
     require_api_enabled(project)
     collection = get_collection(project, collection_name, session)
     record = session.scalar(select(Record).where(Record.id == record_id, Record.project_id == project.id, Record.collection_id == collection.id))
@@ -301,6 +324,7 @@ def update_record(project_id: str, collection_name: str, record_id: str, body: R
 @app.delete("/v1/projects/{project_id}/data/{collection_name}/{record_id}", status_code=204, tags=["data"])
 def delete_record(project_id: str, collection_name: str, record_id: str, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
     project = get_authorized_project(project_id, user, session)
+    require_project_role(project, user, session, write=True)
     require_api_enabled(project)
     collection = get_collection(project, collection_name, session)
     record = session.scalar(select(Record).where(Record.id == record_id, Record.project_id == project.id, Record.collection_id == collection.id))
@@ -309,3 +333,26 @@ def delete_record(project_id: str, collection_name: str, record_id: str, user: U
     session.delete(record)
     session.commit()
     return Response(status_code=204)
+
+
+@app.delete("/v1/projects/{project_id}/collections/{collection_name}", status_code=204, tags=["collections"])
+def delete_collection(project_id: str, collection_name: str, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+    project = get_authorized_project(project_id, user, session)
+    require_project_role(project, user, session, write=True)
+    collection = get_collection(project, collection_name, session)
+    session.delete(collection)
+    session.commit()
+    return Response(status_code=204)
+
+
+@app.get("/v1/projects/{project_id}/collections/{collection_id}/access", response_model=DataAccessResponse, tags=["internal"])
+def collection_access(project_id: str, collection_id: str, write: bool = False, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+    """Authorize a gateway request using the caller's token; never trust a caller-supplied tenant ID."""
+    project = get_authorized_project(project_id, user, session)
+    require_api_enabled(project)
+    if write:
+        require_project_role(project, user, session, write=True)
+    collection = session.scalar(select(Collection).where(Collection.id == collection_id, Collection.project_id == project.id))
+    if collection is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    return DataAccessResponse(project_id=project.id, collection_id=collection.id, name=collection.name, schema=collection.schema_json)

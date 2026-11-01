@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Only the current development branch is maintained at this early stage. There are no production releases or support SLAs yet.
+Only the current development branch and v0.2 workspace code are maintained at this early stage. There are no production releases or support SLAs yet.
 
 ## Reporting a vulnerability
 

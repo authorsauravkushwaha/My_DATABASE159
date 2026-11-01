@@ -1,14 +1,69 @@
 name: CI
-
 on:
   push:
   pull_request:
-
 permissions:
   contents: read
-
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  test:
+  control-plane:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: kestrel_test
+          POSTGRES_USER: kestrel
+          POSTGRES_PASSWORD: ci-only-not-a-production-secret
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U kestrel -d kestrel_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      JWT_SECRET: ci-only-secret-that-is-at-least-32-characters
+      DATABASE_URL: postgresql+psycopg://kestrel:ci-only-not-a-production-secret@127.0.0.1:5432/kestrel_test
+      TEST_DATABASE_URL: postgresql+psycopg://kestrel:ci-only-not-a-production-secret@127.0.0.1:5432/kestrel_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.5"
+          cache: false
+      - run: python -m pip install -r requirements-dev.txt
+      - run: ruff check app tests alembic
+      - name: Versioned migrations
+        run: alembic upgrade head && alembic check && alembic downgrade base && alembic upgrade head
+      - name: SQLite and PostgreSQL tests
+        run: pytest -q
+      - run: pip-audit -r requirements.txt
+      - run: docker build -t kestrel-api:ci .
+
+  workspace:
+    name: TypeScript, Vue, MDX, CSS, JavaScript
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: node scripts/check-workspace.mjs
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test
+      - run: npm run build
+      - run: npm audit
+      - run: docker build -f apps/dashboard/Dockerfile -t kestrel-dashboard:ci .
+
+  browser-tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,41 +71,48 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install dependencies
-        run: python -m pip install -r requirements-dev.txt
-      - name: Lint
-        run: ruff check app tests
-      - name: Test
-        run: pytest -q
-      - name: Dependency audit
-        run: pip-audit -r requirements.txt
-      - name: Verify container build
-        run: docker build -t kestrel-api:ci .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: python -m pip install -r requirements-dev.txt
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-test-results
+          path: test-results/
 
-  go-storage:
-    name: Storage plane (Go)
+  storage-plane:
+    name: Go engine and gateway
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        module: [engine, gateway]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
-          cache: true
-      - name: Build storage engine
-        run: go build ./...
-        working-directory: engine
-      - name: Vet storage engine
-        run: go vet ./...
-        working-directory: engine
-      - name: Test storage engine
-        run: go test ./...
-        working-directory: engine
-      - name: Build gateway
-        run: go build ./...
-        working-directory: gateway
-      - name: Vet gateway
-        run: go vet ./...
-        working-directory: gateway
+          go-version: "1.25.5"
+          cache: false
+      - name: Formatting
+        run: test -z "$(gofmt -l .)"
+        working-directory: ${{ matrix.module }}
+      - run: go vet ./...
+        working-directory: ${{ matrix.module }}
+      - run: go test -race ./...
+        working-directory: ${{ matrix.module }}
+      - run: go build ./...
+        working-directory: ${{ matrix.module }}
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck scripts/*.sh
+      - run: bash -n scripts/*.sh
 
   secret-scan:
     runs-on: ubuntu-latest
@@ -61,5 +123,4 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Scan for committed secrets
-        uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@v2
