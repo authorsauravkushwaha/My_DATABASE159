@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { client, signIn, errorMessage } from '../lib/store';
+import { client, signIn, errorMessage, startDemo } from '../lib/store';
 import Icon from './Icon.vue';
-import { DemoApi } from '../lib/demo';
+// The GitHub Pages build is a static host: there is no control plane to sign in to.
+const staticDemo = import.meta.env.VITE_STATIC_DEMO === 'true';
 const router = useRouter();
 const mode = ref<'login' | 'register'>('login');
 const email = ref(''); const password = ref(''); const organization = ref('');
@@ -19,7 +20,7 @@ async function submit() {
 }
 async function demo() {
   busy.value = true;
-  try { const api = new DemoApi(); await signIn(await api.login({ email: '', password: '' }), true); await router.push('/overview'); }
+  try { await startDemo(); await router.push('/overview'); }
   catch (e) { error.value = errorMessage(e); } finally { busy.value = false; }
 }
 </script>
@@ -34,11 +35,12 @@ async function demo() {
       <div class="auth-foot"><Icon name="shield" :size="17" /> Open source · Tenant-aware · Built to be understood</div>
     </section>
     <section class="auth-form-side">
-      <RouterLink to="/docs" class="auth-docs">Explore the docs <Icon name="arrow" :size="16" /></RouterLink>
+      <div class="auth-toplinks"><RouterLink to="/home" class="auth-docs">Home <Icon name="arrow" :size="16" /></RouterLink><RouterLink to="/docs" class="auth-docs">Explore the docs <Icon name="arrow" :size="16" /></RouterLink></div>
       <div class="auth-form-wrap">
         <span class="eyebrow">LET’S GET YOU SET UP</span><h2>{{ mode === 'login' ? 'Welcome back.' : 'A fresh start.' }}</h2><p class="muted">{{ mode === 'login' ? 'Sign in to your database workspace.' : 'Create your account and your first organization.' }}</p>
-        <div class="segmented"><button :class="{ active: mode === 'login' }" @click="mode = 'login'; error = ''">Sign in</button><button :class="{ active: mode === 'register' }" @click="mode = 'register'; error = ''">Create account</button></div>
-        <form @submit.prevent="submit">
+        <p v-if="staticDemo" class="field-hint static-note">This is the static GitHub Pages build. Accounts need the control plane, so start with the in-browser demo — or run the full stack locally.</p>
+        <div v-if="!staticDemo" class="segmented"><button :class="{ active: mode === 'login' }" @click="mode = 'login'; error = ''">Sign in</button><button :class="{ active: mode === 'register' }" @click="mode = 'register'; error = ''">Create account</button></div>
+        <form v-if="!staticDemo" @submit.prevent="submit">
           <label v-if="mode === 'register'">Organization name<input v-model="organization" required minlength="2" maxlength="120" autocomplete="organization" placeholder="Acme Studio" /></label>
           <label>Email address<input v-model="email" type="email" required autocomplete="email" placeholder="you@company.com" /></label>
           <label>Password<input v-model="password" type="password" required :minlength="mode === 'register' ? 12 : 1" maxlength="128" :autocomplete="mode === 'register' ? 'new-password' : 'current-password'" placeholder="At least 12 characters" /></label>
@@ -46,11 +48,15 @@ async function demo() {
           <p v-if="error" class="error-box" role="alert">{{ error }}</p>
           <button class="button primary full" :disabled="busy">{{ busy ? 'Connecting…' : mode === 'login' ? 'Sign in to workspace' : 'Create workspace' }} <Icon name="arrow" :size="17" /></button>
         </form>
-        <div class="or"><span></span>or take a look around<span></span></div>
-        <button class="button secondary full" :disabled="busy" @click="demo"><Icon name="grid" :size="17" /> Explore the interactive demo</button>
+        <div v-if="!staticDemo" class="or"><span></span>or take a look around<span></span></div>
+        <button :class="staticDemo ? 'button primary full' : 'button secondary full'" :disabled="busy" @click="demo"><Icon name="grid" :size="17" /> {{ staticDemo ? 'Open the demo workspace' : 'Explore the interactive demo' }}</button>
         <p class="auth-note">Demo data stays in this tab and resets on refresh.<br>No account or credit card required.</p>
       </div>
       <p class="auth-bottom">A small, open database platform. A solid place to start.</p>
     </section>
   </main>
 </template>
+<style scoped>
+.static-note{margin:22px 0 18px;font-size:11px;line-height:1.7;color:#8d9a7f;background:#f1f4ea;border:1px solid #e5ebda;border-radius:6px;padding:11px 12px}
+.auth-toplinks{display:flex;gap:20px;align-self:flex-end}
+</style>

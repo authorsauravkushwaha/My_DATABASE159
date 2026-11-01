@@ -36,6 +36,10 @@ export async function signIn(session: AuthSession, demo = false) {
   if (!demo) expiryTimer = setTimeout(() => { signOut(); state.error = 'Your session expired. Sign in again to continue.'; }, session.expires_in * 1000);
   await loadProjects();
 }
+export async function startDemo() {
+  const demo = new DemoApi();
+  await signIn(await demo.login({ email: '', password: '' }), true);
+}
 export async function loadProjects() {
   if (!state.session?.organization_id) return;
   const version = ++loadVersion; state.loading = true; state.error = '';

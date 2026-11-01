@@ -6,6 +6,9 @@ import mdx from '@mdx-js/rollup';
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
   return {
+    // Project pages are served from https://<user>.github.io/<repo>/, so the
+    // static build sets VITE_BASE. Development and self-hosted builds default to '/'.
+    base: env.VITE_BASE || '/',
     plugins: [
       { enforce: 'pre', ...mdx({ jsxImportSource: 'vue', providerImportSource: '@mdx-js/vue' }) },
       vue(), vueJsx({ include: /\.(?:[jt]sx|mdx)$/ }),

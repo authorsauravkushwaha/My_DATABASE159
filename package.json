@@ -19,7 +19,8 @@
     "lint": "eslint .",
     "check:workspace": "node scripts/check-workspace.mjs",
     "check": "bash scripts/check.sh",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "site": "bash scripts/build-site.sh && npm run preview -w @kestrel/dashboard"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

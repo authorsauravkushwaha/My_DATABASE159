@@ -6,6 +6,8 @@ Kestrel combines a tenant-aware PostgreSQL control plane, an experimental Go key
 
 ![Kestrel dashboard showing the explicitly labeled interactive demo](docs/images/dashboard.png)
 
+**Live website:** <https://authorsauravkushwaha.github.io/My_DATABASE159/> — the same Vue workspace, compiled for a static host, with the MDX guides and an in-browser demo.
+
 ## What works
 
 - **Workspace:** registration/sign-in, project creation and switching, collection schema builder, record create/edit/delete, page search, JSON-page export, API toggle, and confirmed destructive actions.
@@ -26,6 +28,25 @@ Kestrel combines a tenant-aware PostgreSQL control plane, an experimental Go key
 | Shell | Repeatable setup, development, verification, and test-server scripts |
 
 The existing **Python/FastAPI** and **Go** services are retained. Choosing a UI language is not a reason to replace the database engine.
+
+## The published website
+
+GitHub Pages serves the workspace as a static site: a project page at `/#/home`, the
+compiled documentation at `/#/docs`, and the explicitly labeled demo workspace. A static
+host runs no API, so account sign-in is limited to the demo there; the full stack still
+starts with the commands below.
+
+```bash
+bash scripts/build-site.sh /My_DATABASE159/   # project-page base path
+bash scripts/build-site.sh                    # site at the domain root
+npm run site                                  # build for the root and preview locally
+```
+
+[`.github/workflows/pages.yml`](.github/workflows/pages.yml) rebuilds and deploys the site
+on every push to `main`. `VITE_BASE` sets the asset base path and `VITE_STATIC_DEMO=true`
+switches the root route to the marketing page and marks the build as having no control
+plane. Unset, both preserve normal local and self-hosted behavior. See
+[deployment](docs/deployment.md#static-github-pages-site).
 
 ## Quick start: full local stack
 
@@ -163,6 +184,7 @@ Read the [threat model](security/THREAT_MODEL.md), [security policy](SECURITY.md
 
 - [Architecture](docs/architecture.md)
 - [Deployment and migrations](docs/deployment.md)
+- [Published website](https://authorsauravkushwaha.github.io/My_DATABASE159/)
 - [Release verification](docs/verification.md)
 - [Contributing](CONTRIBUTING.md)
 - [Changelog](CHANGELOG.md)

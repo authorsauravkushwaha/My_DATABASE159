@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.1 — published website
+
+- Added a public marketing and documentation site served by GitHub Pages from the Vue workspace.
+- Added a home page covering what works, the three-plane architecture, the typed client, and known limits.
+- Added `VITE_BASE` and `VITE_STATIC_DEMO` so one build serves a project page without a control plane, while local and self-hosted behavior stays unchanged.
+- Added `scripts/build-site.sh`, a Pages workflow, and a `npm run site` local preview.
+- The static build states that sign-in needs the API and that the demo workspace is in-memory.
+
 ## 0.2.0 — workspace and hardening
 
 - Added Vue/TypeScript dashboard, responsive CSS, compiled MDX guides, and a clearly labeled in-memory demo.
