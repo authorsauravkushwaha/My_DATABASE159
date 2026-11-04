@@ -1,19 +1,27 @@
+import hmac
 import json
 import os
 import re
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select, text, tuple_
+from sqlalchemy import func, or_, select, text, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.compression import MAX_RECORD_BYTES, purge_engine_namespace
 from app.db import Base, engine, get_session
-from app.middleware import RequestBodyLimitMiddleware, SecurityHeadersMiddleware
-from app.models import Collection, Membership, Organization, Project, Record, User
+from app.metrics import get_registry, reset_registry
+from app.middleware import (
+    MetricsMiddleware,
+    RateLimitMiddleware,
+    RequestBodyLimitMiddleware,
+    SecurityHeadersMiddleware,
+)
+from app.models import ApiKey, Collection, Membership, Organization, Project, Record, User
 from app.query_engine import (
     INDEXABLE_SCALAR_TYPES,
     MAX_COLLECTION_INDEXES,
@@ -28,6 +36,9 @@ from app.query_engine import (
     sync_record_indexes,
 )
 from app.schemas import (
+    ApiKeyCreate,
+    ApiKeyCreatedResponse,
+    ApiKeyResponse,
     BatchRecordCreate,
     BatchWriteResponse,
     CollectionCreate,
@@ -51,6 +62,8 @@ from app.schemas import (
 )
 from app.security import (
     TOKEN_TTL_SECONDS,
+    Principal,
+    generate_api_key,
     get_current_user,
     hash_password,
     issue_token,
@@ -68,19 +81,41 @@ async def lifespan(_: FastAPI):
     yield
 
 
+API_VERSION = "0.3.0"
+
+reset_registry(version=API_VERSION)  # label the process registry with this app's version
+
+OPENAPI_TAGS = [
+    {"name": "authentication", "description": "Account registration and session login."},
+    {"name": "projects", "description": "Organization-scoped projects, storage telemetry, and settings."},
+    {"name": "collections", "description": "Closed collection schemas and online secondary B-tree indexes."},
+    {"name": "data", "description": "Compressed records, atomic batches, NDJSON import/export, and indexed queries."},
+    {"name": "api-keys", "description": "Project-scoped API keys with reader/writer caps. Secrets are shown once at creation."},
+    {"name": "operations", "description": "Liveness, readiness, and Prometheus metrics."},
+    {"name": "internal", "description": "Internal authorization endpoints used by the Go gateway."},
+]
+
 app = FastAPI(
     title="Kestrel Platform API",
     description=(
         "High-density tenant-aware database platform. Supports compressed JSON collections, "
-        "secondary B-tree field indexes, O(1) cursor pagination, batch ingestion, and streaming NDJSON."
+        "secondary B-tree field indexes, O(1) cursor pagination, batch ingestion, streaming NDJSON, "
+        "project-scoped API keys, per-client rate limits, and Prometheus metrics."
     ),
-    version="0.2.0",
+    version=API_VERSION,
+    license_info={"name": "MIT", "url": "https://github.com/authorsauravkushwaha/My_DATABASE159/blob/main/LICENSE"},
+    openapi_tags=OPENAPI_TAGS,
     lifespan=lifespan,
 )
 
 
-app.add_middleware(SecurityHeadersMiddleware)
+# Middleware registers outermost-last: security headers wrap everything (including
+# body-limit rejections), then metrics observe every response, then the rate limiter,
+# then the body limiter closest to the application.
 app.add_middleware(RequestBodyLimitMiddleware)
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(MetricsMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 @app.get("/health", tags=["operations"])
@@ -95,6 +130,22 @@ def ready(session: Session = Depends(get_session)):
     except Exception:
         raise HTTPException(status_code=503, detail="Database is not ready")
     return {"status": "ok", "database": "ready"}
+
+
+@app.get("/metrics", tags=["operations"], response_class=Response)
+def metrics(request: Request):
+    """Prometheus text-format metrics. Optionally gated by ``METRICS_TOKEN`` (Bearer)."""
+    gate = os.getenv("METRICS_TOKEN", "")
+    if gate:
+        provided = request.headers.get("authorization", "")
+        candidate = provided.removeprefix("Bearer ") if provided.startswith("Bearer ") else ""
+        # Bytes comparison: arbitrary header bytes must never raise on non-ASCII input.
+        if not hmac.compare_digest(candidate.encode("utf-8"), gate.encode("utf-8")):
+            raise HTTPException(status_code=401, detail="Invalid or expired authentication token", headers={"WWW-Authenticate": "Bearer"})
+    return Response(
+        content=get_registry().render(),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 
 @app.post("/v1/auth/register", response_model=TokenResponse, status_code=201, tags=["authentication"])
@@ -131,13 +182,15 @@ def login(body: LoginRequest, session: Session = Depends(get_session)):
 
 
 @app.get("/v1/organizations/{organization_id}/projects", response_model=list[ProjectResponse], tags=["projects"])
-def list_projects(organization_id: str, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def list_projects(organization_id: str, user: Principal = Depends(get_current_user), session: Session = Depends(get_session)):
+    require_user_session(user)
     require_membership(session, user.id, organization_id)
     return list(session.scalars(select(Project).where(Project.organization_id == organization_id).order_by(Project.created_at)))
 
 
 @app.post("/v1/organizations/{organization_id}/projects", response_model=ProjectResponse, status_code=201, tags=["projects"])
-def create_project(organization_id: str, body: ProjectCreate, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def create_project(organization_id: str, body: ProjectCreate, user: Principal = Depends(get_current_user), session: Session = Depends(get_session)):
+    require_user_session(user)
     membership = require_membership(session, user.id, organization_id)
     if membership.role not in {"owner", "admin"}:
         raise HTTPException(status_code=403, detail="Organization admin role required")
@@ -152,31 +205,32 @@ def create_project(organization_id: str, body: ProjectCreate, user: User = Depen
     return project
 
 
-def get_authorized_project(project_id: str, user: User, session: Session) -> Project:
+def get_authorized_project(project_id: str, principal: Principal, session: Session) -> Project:
     project = session.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
-    require_membership(session, user.id, project.organization_id)
+    require_membership(session, principal.id, project.organization_id)
+    if principal.api_key is not None and principal.api_key.project_id != project.id:
+        # API keys are single-project: never confirm the existence of other tenants' projects.
+        raise HTTPException(status_code=404, detail="Project not found")
     return project
 
 
 @app.get("/v1/projects/{project_id}", response_model=ProjectResponse, tags=["projects"])
-def get_project(project_id: str, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def get_project(project_id: str, user: Principal = Depends(get_current_user), session: Session = Depends(get_session)):
     return get_authorized_project(project_id, user, session)
 
 
 @app.get("/v1/projects/{project_id}/storage", response_model=ProjectStorageResponse, tags=["projects"])
-def get_project_storage(project_id: str, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def get_project_storage(project_id: str, user: Principal = Depends(get_current_user), session: Session = Depends(get_session)):
     project = get_authorized_project(project_id, user, session)
     return compute_project_storage_stats(session, project)
 
 
 @app.patch("/v1/projects/{project_id}", response_model=ProjectResponse, tags=["projects"])
-def update_project(project_id: str, body: ProjectUpdate, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def update_project(project_id: str, body: ProjectUpdate, user: Principal = Depends(get_current_user), session: Session = Depends(get_session)):
     project = get_authorized_project(project_id, user, session)
-    membership = require_membership(session, user.id, project.organization_id)
-    if membership.role not in {"owner", "admin"}:
-        raise HTTPException(status_code=403, detail="Organization admin role required")
+    require_project_admin(project, user, session)
     project.api_enabled = body.api_enabled
     session.commit()
     session.refresh(project)
@@ -184,11 +238,9 @@ def update_project(project_id: str, body: ProjectUpdate, user: User = Depends(ge
 
 
 @app.delete("/v1/projects/{project_id}", status_code=204, tags=["projects"])
-def delete_project(project_id: str, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def delete_project(project_id: str, user: Principal = Depends(get_current_user), session: Session = Depends(get_session)):
     project = get_authorized_project(project_id, user, session)
-    membership = require_membership(session, user.id, project.organization_id)
-    if membership.role not in {"owner", "admin"}:
-        raise HTTPException(status_code=403, detail="Organization admin role required")
+    require_project_admin(project, user, session)
     pid = project.id
     session.delete(project)
     session.commit()
@@ -284,10 +336,26 @@ def get_collection(project: Project, name: str, session: Session) -> Collection:
     return collection
 
 
-def require_project_role(project: Project, user: User, session: Session, write: bool = False) -> None:
-    membership = require_membership(session, user.id, project.organization_id)
+def require_project_role(project: Project, principal: Principal, session: Session, write: bool = False) -> None:
+    membership = require_membership(session, principal.id, project.organization_id)
     if write and membership.role not in {"owner", "admin", "editor"}:
         raise HTTPException(status_code=403, detail="Project write role required")
+    if write and principal.api_key is not None and principal.api_key.role != "writer":
+        raise HTTPException(status_code=403, detail="This API key is read-only")
+
+
+def require_user_session(principal: Principal) -> None:
+    """Account, organization, and key-administration routes require an interactive user session."""
+    if principal.is_api_key:
+        raise HTTPException(status_code=403, detail="API keys cannot perform account or API-key administration")
+
+
+def require_project_admin(project: Project, principal: Principal, session: Session) -> Membership:
+    require_user_session(principal)
+    membership = require_membership(session, principal.id, project.organization_id)
+    if membership.role not in {"owner", "admin"}:
+        raise HTTPException(status_code=403, detail="Organization admin role required")
+    return membership
 
 
 def require_api_enabled(project: Project) -> None:
@@ -295,8 +363,77 @@ def require_api_enabled(project: Project) -> None:
         raise HTTPException(status_code=403, detail="The project data API is disabled")
 
 
+MAX_ACTIVE_API_KEYS = 50
+
+
+@app.post("/v1/projects/{project_id}/api-keys", response_model=ApiKeyCreatedResponse, status_code=201, tags=["api-keys"])
+def create_api_key(
+    project_id: str,
+    body: ApiKeyCreate,
+    user: Principal = Depends(get_current_user),
+    session: Session = Depends(get_session),
+):
+    """Mint a project-scoped API key. The full secret is returned exactly once and stored only as a digest."""
+    project = get_authorized_project(project_id, user, session)
+    require_project_admin(project, user, session)
+    now = datetime.now(timezone.utc)
+    active = session.scalar(
+        select(func.count(ApiKey.id))
+        .where(ApiKey.project_id == project.id, ApiKey.revoked_at.is_(None))
+        .where(or_(ApiKey.expires_at.is_(None), ApiKey.expires_at > now))
+    )
+    if int(active or 0) >= MAX_ACTIVE_API_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"At most {MAX_ACTIVE_API_KEYS} active API keys are allowed per project",
+        )
+    expires_at = now + timedelta(days=body.expires_in_days) if body.expires_in_days is not None else None
+    for _ in range(3):  # tolerate the (astronomically unlikely) public-prefix collision
+        token, prefix, digest = generate_api_key()
+        key = ApiKey(
+            project_id=project.id,
+            created_by=user.id,
+            name=body.name,
+            key_prefix=prefix,
+            key_hash=digest,
+            role=body.role,
+            expires_at=expires_at,
+        )
+        session.add(key)
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            continue
+        session.refresh(key)
+        return ApiKeyCreatedResponse(**ApiKeyResponse.model_validate(key).model_dump(), api_key=token)
+    raise HTTPException(status_code=503, detail="Could not allocate a unique API key prefix. Retry shortly.")
+
+
+@app.get("/v1/projects/{project_id}/api-keys", response_model=list[ApiKeyResponse], tags=["api-keys"])
+def list_api_keys(project_id: str, user: Principal = Depends(get_current_user), session: Session = Depends(get_session)):
+    project = get_authorized_project(project_id, user, session)
+    require_project_admin(project, user, session)
+    keys = session.scalars(select(ApiKey).where(ApiKey.project_id == project.id).order_by(ApiKey.created_at.desc(), ApiKey.id))
+    return list(keys)
+
+
+@app.delete("/v1/projects/{project_id}/api-keys/{key_id}", status_code=204, tags=["api-keys"])
+def revoke_api_key(project_id: str, key_id: str, user: Principal = Depends(get_current_user), session: Session = Depends(get_session)):
+    """Revoke a key immediately. The tombstone is kept so the prefix can never be re-registered."""
+    project = get_authorized_project(project_id, user, session)
+    require_project_admin(project, user, session)
+    key = session.scalar(select(ApiKey).where(ApiKey.id == key_id, ApiKey.project_id == project.id))
+    if key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    if key.revoked_at is None:
+        key.revoked_at = datetime.now(timezone.utc)
+        session.commit()
+    return Response(status_code=204)
+
+
 @app.post("/v1/projects/{project_id}/collections", response_model=CollectionResponse, status_code=201, tags=["collections"])
-def create_collection(project_id: str, body: CollectionCreate, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def create_collection(project_id: str, body: CollectionCreate, user: Principal = Depends(get_current_user), session: Session = Depends(get_session)):
     project = get_authorized_project(project_id, user, session)
     require_project_role(project, user, session, write=True)
     require_api_enabled(project)
@@ -312,7 +449,7 @@ def create_collection(project_id: str, body: CollectionCreate, user: User = Depe
 
 
 @app.get("/v1/projects/{project_id}/collections", response_model=list[CollectionResponse], tags=["collections"])
-def list_collections(project_id: str, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def list_collections(project_id: str, user: Principal = Depends(get_current_user), session: Session = Depends(get_session)):
     project = get_authorized_project(project_id, user, session)
     require_api_enabled(project)
     collections = session.scalars(select(Collection).where(Collection.project_id == project.id).order_by(Collection.name))
@@ -324,7 +461,7 @@ def add_collection_index(
     project_id: str,
     collection_name: str,
     body: IndexCreateRequest,
-    user: User = Depends(get_current_user),
+    user: Principal = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
     project = get_authorized_project(project_id, user, session)
@@ -339,7 +476,7 @@ def remove_collection_index(
     project_id: str,
     collection_name: str,
     field_name: str,
-    user: User = Depends(get_current_user),
+    user: Principal = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
     project = get_authorized_project(project_id, user, session)
@@ -354,7 +491,7 @@ def remove_collection_index(
 def compact_collection(
     project_id: str,
     collection_name: str,
-    user: User = Depends(get_current_user),
+    user: Principal = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
     project = get_authorized_project(project_id, user, session)
@@ -365,7 +502,7 @@ def compact_collection(
 
 
 @app.post("/v1/projects/{project_id}/data/{collection_name}", response_model=RecordResponse, status_code=201, tags=["data"])
-def create_record(project_id: str, collection_name: str, body: RecordCreate, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def create_record(project_id: str, collection_name: str, body: RecordCreate, user: Principal = Depends(get_current_user), session: Session = Depends(get_session)):
     project = get_authorized_project(project_id, user, session)
     require_project_role(project, user, session, write=True)
     require_api_enabled(project)
@@ -428,7 +565,7 @@ def batch_create_records(
     project_id: str,
     collection_name: str,
     body: BatchRecordCreate,
-    user: User = Depends(get_current_user),
+    user: Principal = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
     project = get_authorized_project(project_id, user, session)
@@ -443,7 +580,7 @@ async def import_records_ndjson(
     project_id: str,
     collection_name: str,
     request: Request,
-    user: User = Depends(get_current_user),
+    user: Principal = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
     project = get_authorized_project(project_id, user, session)
@@ -480,7 +617,7 @@ async def import_records_ndjson(
 def export_records_ndjson(
     project_id: str,
     collection_name: str,
-    user: User = Depends(get_current_user),
+    user: Principal = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
     project = get_authorized_project(project_id, user, session)
@@ -499,7 +636,7 @@ def query_records(
     project_id: str,
     collection_name: str,
     body: RecordQueryRequest,
-    user: User = Depends(get_current_user),
+    user: Principal = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
     project = get_authorized_project(project_id, user, session)
@@ -525,7 +662,7 @@ def list_records(
     limit: int = Query(50, ge=1, le=100),
     offset: int = Query(0, ge=0),
     after: str | None = Query(None, max_length=128),
-    user: User = Depends(get_current_user),
+    user: Principal = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
     project = get_authorized_project(project_id, user, session)
@@ -549,7 +686,7 @@ def list_records(
 
 
 @app.patch("/v1/projects/{project_id}/data/{collection_name}/{record_id}", response_model=RecordResponse, tags=["data"])
-def update_record(project_id: str, collection_name: str, record_id: str, body: RecordUpdate, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def update_record(project_id: str, collection_name: str, record_id: str, body: RecordUpdate, user: Principal = Depends(get_current_user), session: Session = Depends(get_session)):
     project = get_authorized_project(project_id, user, session)
     require_project_role(project, user, session, write=True)
     require_api_enabled(project)
@@ -567,7 +704,7 @@ def update_record(project_id: str, collection_name: str, record_id: str, body: R
 
 
 @app.delete("/v1/projects/{project_id}/data/{collection_name}/{record_id}", status_code=204, tags=["data"])
-def delete_record(project_id: str, collection_name: str, record_id: str, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def delete_record(project_id: str, collection_name: str, record_id: str, user: Principal = Depends(get_current_user), session: Session = Depends(get_session)):
     project = get_authorized_project(project_id, user, session)
     require_project_role(project, user, session, write=True)
     require_api_enabled(project)
@@ -581,7 +718,7 @@ def delete_record(project_id: str, collection_name: str, record_id: str, user: U
 
 
 @app.delete("/v1/projects/{project_id}/collections/{collection_name}", status_code=204, tags=["collections"])
-def delete_collection(project_id: str, collection_name: str, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def delete_collection(project_id: str, collection_name: str, user: Principal = Depends(get_current_user), session: Session = Depends(get_session)):
     project = get_authorized_project(project_id, user, session)
     require_project_role(project, user, session, write=True)
     collection = get_collection(project, collection_name, session)
@@ -593,7 +730,7 @@ def delete_collection(project_id: str, collection_name: str, user: User = Depend
 
 
 @app.get("/v1/projects/{project_id}/collections/{collection_id}/access", response_model=DataAccessResponse, tags=["internal"])
-def collection_access(project_id: str, collection_id: str, write: bool = False, user: User = Depends(get_current_user), session: Session = Depends(get_session)):
+def collection_access(project_id: str, collection_id: str, write: bool = False, user: Principal = Depends(get_current_user), session: Session = Depends(get_session)):
     """Authorize a gateway request using the caller's token; never trust a caller-supplied tenant ID."""
     project = get_authorized_project(project_id, user, session)
     require_api_enabled(project)

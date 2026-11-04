@@ -1,6 +1,6 @@
 {
   "name": "@kestrel/client",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "Typed, dependency-free client for the Kestrel control-plane API",
   "exports": {

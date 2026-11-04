@@ -1,9 +1,12 @@
 import type {
+  ApiKeyCreateInput,
+  ApiKeySummary,
   AuthSession,
   BatchWriteResult,
   Collection,
   CollectionSchema,
   CompactionResult,
+  CreatedApiKey,
   DataRecord,
   IndexResult,
   Json,
@@ -153,6 +156,42 @@ export class DemoApi {
   }
   async setProjectApi(id: string, enabled: boolean) {
     const project = this.findProject(id); project.api_enabled = enabled; return structuredClone(project);
+  }
+  private apiKeys: Record<string, CreatedApiKey[]> = {};
+  async listApiKeys(project: string, signal?: AbortSignal): Promise<ApiKeySummary[]> {
+    void signal;
+    this.findProject(project);
+    return (this.apiKeys[project] ?? []).map(({ api_key: _secret, ...summary }) => summary);
+  }
+  async createApiKey(project: string, input: ApiKeyCreateInput): Promise<CreatedApiKey> {
+    this.findProject(project);
+    const hex = (bytes: number) =>
+      Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, '0')).join('');
+    const prefix = hex(8);
+    const secret = hex(16);
+    const key: CreatedApiKey = {
+      id: crypto.randomUUID(),
+      project_id: project,
+      name: input.name,
+      role: input.role ?? 'reader',
+      key_prefix: prefix,
+      created_by: 'demo-user',
+      created_at: new Date().toISOString(),
+      expires_at: input.expires_in_days
+        ? new Date(Date.now() + input.expires_in_days * 86_400_000).toISOString()
+        : null,
+      last_used_at: null,
+      revoked_at: null,
+      api_key: `klr_${prefix}_${secret}`,
+    };
+    (this.apiKeys[project] ??= []).unshift(key);
+    return structuredClone(key);
+  }
+  async revokeApiKey(project: string, keyId: string): Promise<void> {
+    this.findProject(project);
+    const key = (this.apiKeys[project] ?? []).find((item) => item.id === keyId);
+    if (!key) throw new ApiError(404, 'API key not found');
+    if (!key.revoked_at) key.revoked_at = new Date().toISOString();
   }
   async deleteProject(id: string) {
     this.findProject(id);
@@ -340,6 +379,9 @@ export type WorkspaceApi = Pick<
   | 'createProject'
   | 'getProjectStorage'
   | 'setProjectApi'
+  | 'listApiKeys'
+  | 'createApiKey'
+  | 'revokeApiKey'
   | 'deleteProject'
   | 'listCollections'
   | 'createCollection'

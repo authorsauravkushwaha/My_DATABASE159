@@ -41,7 +41,7 @@ async function logout() { signOut(); await router.push('/overview'); }
         <div v-if="state.error" class="error-box page-error" role="alert"><span>{{ state.error }}</span><button class="text-button" @click="loadProjects">Retry</button></div>
         <div v-if="state.loading" class="loading-line" role="progressbar" aria-label="Loading workspace"></div>
         <RouterView />
-        <footer class="page-footer"><span>Built on open foundations.</span><span>Kestrel <span class="footer-dot">·</span> v0.2.0</span></footer>
+        <footer class="page-footer"><span>Built on open foundations.</span><span>Kestrel <span class="footer-dot">·</span> v0.3.0</span></footer>
       </main>
     </div>
     <div v-if="state.notice" class="toast" role="status"><span class="toast-check"><Icon name="check" :size="16" /></span>{{ state.notice }}<button class="icon-button" aria-label="Dismiss notification" @click="state.notice = ''"><Icon name="close" :size="15" /></button></div>

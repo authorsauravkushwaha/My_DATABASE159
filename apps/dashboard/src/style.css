@@ -23,3 +23,17 @@
 @media(max-width:900px){.capacity-strip{grid-template-columns:repeat(2,1fr)}}
 @media(max-width:680px){.capacity-strip{grid-template-columns:1fr;padding:14px}.schema-table-indexed .schema-row{grid-template-columns:1fr .7fr .7fr .9fr}.builder-head-indexed,.builder-row-indexed{grid-template-columns:1.1fr .9fr 34px 34px 25px;gap:5px}.query-bar{padding:12px 14px}}
 
+
+/* Project settings: API keys */
+.api-keys-panel .key-list{list-style:none;margin:0;padding:0}
+.key-list li{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:15px 23px;border-top:1px solid var(--border)}
+.key-list li:first-child{border-top:0}
+.key-main{display:flex;flex-direction:column;gap:6px;min-width:0}
+.key-title{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.key-title strong{font-size:12px}
+.key-prefix{color:#7f8f7a;font-size:11px;overflow-wrap:anywhere}
+.keys-empty{padding:26px 23px;font-size:11px}
+.secret-box{display:flex;align-items:center;gap:10px;background:#f7f9f3;border:1px solid var(--border);border-radius:7px;padding:13px 15px;margin:6px 0 4px}
+.secret-box code{flex:1;overflow-wrap:anywhere;font-size:12px;color:#3f5c46}
+.api-keys-panel .panel-heading .button{flex-shrink:0}
+@media(max-width:680px){.key-list li{flex-direction:column;align-items:flex-start}}

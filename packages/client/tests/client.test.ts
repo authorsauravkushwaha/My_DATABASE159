@@ -60,6 +60,30 @@ describe('KestrelClient', () => {
     expect(() => new KestrelClient({ baseUrl: 'file:///tmp/test' })).toThrow('HTTP(S)');
     expect(() => new KestrelClient({ baseUrl: 'https://user:pass@example.com' })).toThrow('credentials');
   });
+  it('manages project API keys with one-time secrets', async () => {
+    const summary = { id: 'k1', project_id: 'p1', name: 'CI writer', role: 'writer' as const, key_prefix: 'a'.repeat(16), created_by: 'u1', created_at: '2026-11-04T00:00:00Z', expires_at: null, last_used_at: null, revoked_at: null };
+    const created = { ...summary, api_key: `klr_${'a'.repeat(16)}_${'b'.repeat(32)}` };
+    const fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') return response(created, 201);
+      if (init?.method === 'DELETE') return response(null, 204);
+      return response([summary]);
+    });
+    const client = new KestrelClient({ fetch, token: 'tok' });
+
+    const listed = await client.listApiKeys('p1');
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/v1/projects/p1/api-keys');
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).not.toHaveProperty('api_key');
+
+    const minted = await client.createApiKey('p1', { name: 'CI writer', role: 'writer' });
+    expect(fetch.mock.calls[1]?.[1]?.method).toBe('POST');
+    expect(JSON.parse(String(fetch.mock.calls[1]?.[1]?.body))).toEqual({ name: 'CI writer', role: 'writer' });
+    expect(minted.api_key).toMatch(/^klr_[0-9a-f]{16}_[0-9a-f]{32}$/);
+
+    await client.revokeApiKey('p1', 'k1');
+    expect(fetch.mock.calls[2]?.[0]).toBe('/api/v1/projects/p1/api-keys/k1');
+    expect(fetch.mock.calls[2]?.[1]?.method).toBe('DELETE');
+  });
   it('supports batch ingestion, indexed queries, storage telemetry, and NDJSON export/import', async () => {
     const fetch = vi.fn(async (url: string) => {
       if (url.endsWith('/export')) {

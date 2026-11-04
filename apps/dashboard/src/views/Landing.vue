@@ -253,7 +253,7 @@ const missing = [
         <div><h4>Read</h4><RouterLink to="/docs">Documentation</RouterLink><RouterLink to="/docs" @click="scrollTo('architecture')">Security &amp; limits</RouterLink><a href="https://github.com/authorsauravkushwaha/My_DATABASE159" target="_blank" rel="noreferrer noopener">GitHub</a></div>
         <div><h4>Project</h4><a href="https://github.com/authorsauravkushwaha/My_DATABASE159/blob/main/LICENSE" target="_blank" rel="noreferrer noopener">MIT license</a><a href="https://github.com/authorsauravkushwaha/My_DATABASE159/blob/main/CHANGELOG.md" target="_blank" rel="noreferrer noopener">Changelog</a><a href="https://github.com/authorsauravkushwaha/My_DATABASE159/blob/main/CONTRIBUTING.md" target="_blank" rel="noreferrer noopener">Contributing</a></div>
       </div>
-      <div class="footer-base"><span>© 2026 Kestrel contributors</span><span>v0.2.0 <span class="footer-dot">·</span> Built on open foundations</span></div>
+      <div class="footer-base"><span>© 2026 Kestrel contributors</span><span>v0.3.0 <span class="footer-dot">·</span> Built on open foundations</span></div>
     </footer>
   </div>
 </template>

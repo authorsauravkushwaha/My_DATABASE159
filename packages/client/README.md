@@ -20,10 +20,13 @@ const page = await client.queryRecords(projectId, 'notes', {
 });
 ```
 
+Server-to-server code can skip interactive login by minting a project-scoped key once — `await client.createApiKey(projectId, { name: 'Nightly ingest', role: 'writer' })` returns the `klr_…` secret exactly once, after which `client.setToken(key.api_key)` authenticates reads/writes under that key's reader/writer cap.
+
 ## API
 
 - `register`, `login`, `health`, `ready`
 - `listProjects`, `createProject`, `getProject`, `getProjectStorage`, `setProjectApi`, `deleteProject`
+- `listApiKeys`, `createApiKey`, `revokeApiKey`
 - `listCollections`, `createCollection`, `deleteCollection`, `createIndex`, `deleteIndex`, `compactCollection`
 - `listRecords`, `queryRecords`, `createRecord`, `batchCreateRecords`, `importRecordsNdjson`, `exportRecordsNdjson`, `updateRecord`, `deleteRecord`
 - `setToken`, `clearToken`

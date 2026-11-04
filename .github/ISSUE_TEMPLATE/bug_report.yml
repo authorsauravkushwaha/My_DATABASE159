@@ -1,0 +1,46 @@
+name: Bug report
+description: Report a reproducible defect in Kestrel
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. **Do not file public issues for
+        exploitable vulnerabilities** — follow [SECURITY.md](../../SECURITY.md) instead.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Clear description of the defect and the impact you observed.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Minimal commands, API calls, or UI steps. Include request shapes without real secrets.
+      placeholder: |
+        1. `bash scripts/setup.sh && bash scripts/dev.sh`
+        2. POST /v1/... with {...}
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      placeholder: "0.3.0 or commit SHA"
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python/Node/Go versions, SQLite vs PostgreSQL, Docker Compose or bare.
+    validations:
+      required: true

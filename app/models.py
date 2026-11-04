@@ -118,6 +118,27 @@ class Record(Base):
             self.shard_key = compute_shard_key(self.id)
 
 
+class ApiKey(Base):
+    """Project-scoped API key. Only a SHA-256 digest of the secret is stored."""
+
+    __tablename__ = "api_keys"
+    __table_args__ = (
+        UniqueConstraint("key_prefix", name="uq_api_key_prefix"),
+        Index("ix_api_keys_project_revoked", "project_id", "revoked_at"),
+    )
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    key_prefix: Mapped[str] = mapped_column(String(16))
+    key_hash: Mapped[str] = mapped_column(String(64))
+    role: Mapped[str] = mapped_column(String(10), default="reader")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class RecordFieldIndex(Base):
     __tablename__ = "record_field_indexes"
     __table_args__ = (

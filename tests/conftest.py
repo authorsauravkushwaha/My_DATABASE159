@@ -1,6 +1,11 @@
 import os
 
 os.environ.setdefault("JWT_SECRET", "test-only-secret-that-is-at-least-32-bytes")
+# Keep the full suite far away from the default per-minute rate windows; the
+# limiter's own behavior is covered by focused tests with explicit small limits.
+os.environ.setdefault("RATE_LIMIT_MAX_REQUESTS", "1000000")
+os.environ.setdefault("RATE_LIMIT_AUTH_MAX_REQUESTS", "1000000")
+os.environ.pop("METRICS_TOKEN", None)
 
 import pytest
 from fastapi.testclient import TestClient
