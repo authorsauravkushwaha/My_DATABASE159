@@ -37,7 +37,7 @@ jobs:
           # is not permitted by the token. `enablement: true` lets the workflow do it
           # when the repository allows the token to manage Pages.
           enablement: true
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: apps/dashboard/dist
 
