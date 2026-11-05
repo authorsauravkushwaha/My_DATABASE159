@@ -116,11 +116,17 @@ jobs:
 
   secret-scan:
     runs-on: ubuntu-latest
+    # Read the repository and let the action list PR commits and post its
+    # findings as a review comment. gitleaks-action fails a pull_request scan
+    # when GITHUB_TOKEN is missing, so the token is passed in the step below.
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_SUMMARY: true
