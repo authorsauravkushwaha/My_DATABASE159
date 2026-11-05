@@ -14,7 +14,7 @@
     "@kestrel/client": "0.3.0",
     "@mdx-js/vue": "3.1.1",
     "vue": "3.5.44",
-    "vue-router": "4.6.4"
+    "vue-router": "5.4.0"
   },
   "devDependencies": {
     "@mdx-js/rollup": "3.1.1",
