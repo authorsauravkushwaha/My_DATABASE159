@@ -107,3 +107,50 @@ func TestScanAfterUsesFullKeyWithoutChangingPrefix(t *testing.T) {
 		t.Fatalf("unexpected cursor result: %+v", rows)
 	}
 }
+
+func TestBatchFlushPersistsEntireBatch(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenWithOptions(dir, Options{MemTableBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := []BatchOp{{Key: "first", Value: "one"}, {Key: "second", Value: "two"}}
+	if err := s.WriteBatch(ops); err != nil {
+		t.Fatal(err)
+	}
+	// A threshold-triggered flush must cover every entry before truncating WAL.
+	if s.mem.Len() != 0 {
+		t.Fatal("batch left entries outside the flushed snapshot")
+	}
+	if len(s.runs) != 1 {
+		t.Fatalf("expected one complete batch flush, got %d", len(s.runs))
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = OpenWithOptions(dir, Options{MemTableBytes: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, op := range ops {
+		value, ok, err := s.Get(op.Key)
+		if err != nil || !ok || string(value) != op.Value {
+			t.Fatalf("%s: got %q, %v, %v", op.Key, value, ok, err)
+		}
+	}
+}
+
+func TestShardedBatchValidatesBeforeWriting(t *testing.T) {
+	s, err := OpenSharded(t.TempDir(), 4, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.WriteBatch([]BatchOp{{Key: "valid", Value: "value"}, {Key: "", Value: "invalid"}}); err == nil {
+		t.Fatal("expected validation error")
+	}
+	if _, ok, _ := s.Get("valid"); ok {
+		t.Fatal("invalid batch wrote a valid entry")
+	}
+}

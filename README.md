@@ -54,6 +54,14 @@ flowchart LR
 - **`packages/client/` — `@kestrel/client`**: Zero-dependency TypeScript SDK supporting single & batch CRUD, B-tree indexed queries, cursor pagination, streaming NDJSON import/export, index management, API-key lifecycle, compaction, and storage telemetry.
 - **`apps/dashboard/` — Vue 3 Workspace**: Calm interface for managing projects, 128-field schemas, online B-tree indexes, bulk batch/NDJSON ingestion, server-side indexed queries, API keys with one-time secret display, and real-time compression density metrics.
 
+## Current storage-engine limitations
+
+The Go engine is experimental; do not rely on it as the sole copy of critical data. Keep tested backups. In particular:
+
+- A batch is atomic within one shard, but a batch spanning shards can partially commit if a shard fails. Gateway collection batches route to one shard; arbitrary engine-level batches may not.
+- Keep the configured shard count unchanged when reopening an existing engine directory. Changing it alters key routing and can make existing data inaccessible; there is currently no resharding procedure.
+- Compaction does not yet use an atomic manifest. An interruption during compaction can leave old and new SSTables together, potentially resurrecting deleted records on recovery. Replication and point-in-time recovery are not yet implemented.
+
 ## Quickstart with Docker Compose
 
 Prerequisites: Docker 24+ with Docker Compose v2, plus Bash and Python 3 or OpenSSL to generate `.env`.

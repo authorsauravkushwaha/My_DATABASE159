@@ -302,16 +302,10 @@ func (s *LSMStore) WriteBatch(ops []BatchOp) error {
 		} else {
 			s.mem.Put(e.Key, e.Value, false)
 		}
-		if s.mem.ApproxSize() >= s.opts.MemTableBytes {
-			if err := s.flushLocked(); err != nil {
-				return err
-			}
-		}
 	}
-	if len(s.runs) >= s.opts.AutoCompactThreshold {
-		return s.compactLocked()
-	}
-	return nil
+	// A flush truncates the entire WAL. Apply the complete batch first so a
+	// crash cannot leave only the first part of its durable frame on disk.
+	return s.maybeFlushAndCompactLocked()
 }
 
 // DeletePrefix deletes all live keys under prefix (e.g. a deleted collection
@@ -720,6 +714,10 @@ func (ss *ShardedStore) WriteBatch(ops []BatchOp) error {
 	}
 	grouped := make(map[int][]BatchOp)
 	for _, op := range ops {
+		// Validate the entire request before any shard can commit its part.
+		if err := validateKV([]byte(op.Key), []byte(op.Value), op.Delete); err != nil {
+			return err
+		}
 		rk, _ := routingPrefix(op.Key)
 		idx := ss.shardIndex(rk)
 		grouped[idx] = append(grouped[idx], op)
