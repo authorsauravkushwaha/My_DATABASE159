@@ -90,10 +90,26 @@ npm run test:e2e
 
 Playwright starts the API and dashboard if needed. `CHROMIUM_EXECUTABLE_PATH` can point to an existing compatible Chromium binary. Tests create disposable accounts/records in `.kestrel/e2e.db`; never point the test server at production. CI installs Chromium and uploads failure traces.
 
+## Rate limiting and metrics
+
+The API enforces two per-client fixed windows in process memory (no external dependencies):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `RATE_LIMIT_MAX_REQUESTS` / `RATE_LIMIT_WINDOW_SECONDS` | `1200` / `60` | Global per-client window for all non-exempt routes. |
+| `RATE_LIMIT_AUTH_MAX_REQUESTS` / `RATE_LIMIT_AUTH_WINDOW_SECONDS` | `20` / `60` | Strict window on `/v1/auth/*` against credential stuffing. |
+| `RATE_LIMIT_DISABLED` | `false` | Disable enforcement and headers entirely. |
+| `RATE_LIMIT_TRUST_PROXY` | `false` | Key on the first `X-Forwarded-For` hop instead of the peer address. Enable **only** behind a proxy that overwrites that header. |
+
+Successful responses carry `X-RateLimit-Limit` / `X-RateLimit-Remaining`; rejections are `429` with `Retry-After`. `/health` and `/ready` are exempt so probes never starve. The limiter is per process and IP-based: multi-replica deployments should keep a shared limiter at the edge (the defaults are deliberately generous to avoid false positives behind NAT).
+
+`GET /metrics` serves Prometheus text format (`kestrel_http_requests_total`, `kestrel_http_request_duration_seconds`, `kestrel_build_info`) with UUID and collection-name path normalization plus a 200-pattern cardinality cap per process. Set `METRICS_TOKEN` (32+ characters) to require `Authorization: Bearer <token>` for scrapes; otherwise the endpoint is open like `/health`. Scrape each worker/replica separately — the registry is intentionally in-process.
+
 ## Health and shutdown
 
 - API `/health`: process liveness only.
 - API `/ready`: executes `SELECT 1`; does not verify migrations or Go dependencies.
+- API `/metrics`: Prometheus registry render; counts every response including rejections.
 - Gateway `/health`: process liveness only, not authorization/storage readiness.
 - Dashboard container: checks its static entry page.
 - Gateway handles SIGTERM with a bounded graceful shutdown.
@@ -110,6 +126,6 @@ Dashboard JSON export is **one page**, not a backup. Deleting a project/collecti
 
 ## Production gates—not included yet
 
-Before public production use, provide TLS ingress, managed secrets and rotation, least-privilege DB roles, PostgreSQL RLS, edge rate/concurrency/body limits, identity recovery/MFA/session revocation, audit logs, metrics/alerting, quotas, encrypted backups, restore drills, migration rollback exercises, dependency/container scanning, and independent security review.
+Before public production use, provide TLS ingress, managed secrets and rotation, least-privilege DB roles, PostgreSQL RLS, distributed edge rate/concurrency limits on top of the in-process defaults, identity recovery/MFA/session revocation, audit logs, alerting on `/metrics`, quotas, encrypted backups, restore drills, migration rollback exercises, dependency/container scanning, and independent security review.
 
 The Go engine remains experimental: no full SSTable checksum validation, multi-process lock, replication, or measured crash/load guarantees. No production RPO/RTO, availability, or performance claim is made.

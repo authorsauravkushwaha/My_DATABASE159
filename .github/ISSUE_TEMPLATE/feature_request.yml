@@ -1,0 +1,27 @@
+name: Feature request
+description: Propose an improvement or new capability for Kestrel
+title: "[feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to accomplish, and who is blocked without this?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How should it work from an API, storage, or UX perspective?
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope checks
+      options:
+        - label: I have searched existing issues and the roadmap for duplicates.
+        - label: I understand security-sensitive changes may need discussion before implementation.
+        - label: I am willing to help test a pull request for this feature.

@@ -51,3 +51,14 @@ const page = await db.queryRecords(projectId, 'products', {
 ```
 
 For large dataset migrations or backups, stream the entire collection in constant memory using `db.exportRecordsNdjson(projectId, 'products')` or upload newline-delimited JSON with `db.importRecordsNdjson(...)`.
+
+## 4. Hand servers a scoped API key
+
+Browser sessions are short-lived; background jobs and services should authenticate with a project-scoped key instead. Mint one from **Settings → API keys** or straight from the SDK:
+
+```ts
+const key = await db.createApiKey(projectId, { name: 'Nightly ingest', role: 'writer', expires_in_days: 90 });
+db.setToken(key.api_key); // full secret, returned exactly once
+```
+
+`reader` keys can list, query, and export but never write; `writer` keys cover the full data plane but cannot manage projects, organizations, or keys. A key is pinned to one project, cannot outlive its creator's membership, and stops working the moment it is revoked.

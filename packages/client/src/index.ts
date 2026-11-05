@@ -107,6 +107,28 @@ export interface EngineStorageStats {
   compression_ratio?: number;
   estimated_keys?: number;
 }
+export type ApiKeyRole = 'reader' | 'writer';
+export interface ApiKeySummary {
+  id: string;
+  project_id: string;
+  name: string;
+  role: ApiKeyRole;
+  key_prefix: string;
+  created_by: string;
+  created_at: string;
+  expires_at: string | null;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+export interface CreatedApiKey extends ApiKeySummary {
+  /** Full secret. Shown once at creation; only a SHA-256 digest is stored server-side. */
+  api_key: string;
+}
+export interface ApiKeyCreateInput {
+  name: string;
+  role?: ApiKeyRole;
+  expires_in_days?: number | null;
+}
 export interface ProjectStorageStats {
   project_id: string;
   total_collections: number;
@@ -245,6 +267,15 @@ export class KestrelClient {
   }
   setProjectApi(id: string, enabled: boolean) {
     return this.request<Project>('PATCH', `/v1/projects/${encodeURIComponent(id)}`, { api_enabled: enabled });
+  }
+  listApiKeys(projectId: string, signal?: AbortSignal) {
+    return this.request<ApiKeySummary[]>('GET', `/v1/projects/${encodeURIComponent(projectId)}/api-keys`, undefined, signal);
+  }
+  createApiKey(projectId: string, input: ApiKeyCreateInput) {
+    return this.request<CreatedApiKey>('POST', `/v1/projects/${encodeURIComponent(projectId)}/api-keys`, input);
+  }
+  revokeApiKey(projectId: string, keyId: string) {
+    return this.request<void>('DELETE', `/v1/projects/${encodeURIComponent(projectId)}/api-keys/${encodeURIComponent(keyId)}`);
   }
   deleteProject(id: string) {
     return this.request<void>('DELETE', `/v1/projects/${encodeURIComponent(id)}`);

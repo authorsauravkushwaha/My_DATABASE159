@@ -7,6 +7,8 @@ Kestrel enforces tenant checks and strict resource bounds across both single-rec
 - **Organization membership & RBAC**: Project, collection, index, storage-telemetry, and record routes verify that the signed-in user belongs to the owning organization, and require `owner` or `admin` for mutations, batch imports, index DDL, and compaction.
 - **Password hashing**: User passwords use salted PBKDF2-HMAC-SHA256 hashes (`600,000` iterations) with constant-time verification.
 - **Short-lived tokens**: Access tokens expire after 15 minutes and stay in memory inside the dashboard rather than `localStorage`.
+- **Project-scoped API keys**: Server integrations can mint `klr_…` keys capped as `reader` or `writer`; only a SHA-256 digest is stored, secrets are shown once, keys never outlive their creator's membership, and revocation is immediate.
+- **Per-client rate limits**: A strict per-IP window guards `/v1/auth/*` (credential stuffing) and a generous global window guards everything else, with `X-RateLimit-*` and `Retry-After` headers; tune or disable via `RATE_LIMIT_*` environment variables.
 - **Closed schemas & bounded ingestion**: Control-plane requests stay capped at 128 KiB, single-record writes allow up to 512 KiB (up to 128 typed fields), and bulk `/batch` + `/import` routes accept up to 5,000 records / 16 MiB per call with streaming byte enforcement before decompression.
 - **O(1) cursor pagination & streaming exports**: `GET` list endpoints enforce `limit <= 100`, `/query` enforces `limit <= 1000`, and `/export` streams NDJSON chunks without buffering full collections in memory.
 - **Hardened container defaults**: NGINX and FastAPI send `Content-Security-Policy`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, and `Cache-Control: no-store`.
@@ -14,5 +16,5 @@ Kestrel enforces tenant checks and strict resource bounds across both single-rec
 ## What you should add before production
 
 - HTTPS termination, HSTS at your edge proxy, and secret management outside `.env` files.
-- Rate limiting on authentication and bulk write endpoints.
+- Distributed rate limiting at your edge for multi-replica deployments (the built-in limiter is per process) and per-account throttling beyond the IP-based defaults.
 - Automated backups, restore drills, audit logs, refresh-token revocation, and multi-factor authentication for sensitive workspaces.

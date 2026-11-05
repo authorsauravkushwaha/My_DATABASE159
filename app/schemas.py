@@ -196,3 +196,38 @@ class DataAccessResponse(BaseModel):
 
 class ErrorResponse(BaseModel):
     detail: str
+
+
+class ApiKeyCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    role: Literal["reader", "writer"] = "reader"
+    expires_in_days: int | None = Field(default=None, ge=1, le=3650)
+
+    @field_validator("name")
+    @classmethod
+    def nonblank_name(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("API key name must not be blank")
+        return value
+
+
+class ApiKeyResponse(BaseModel):
+    id: str
+    project_id: str
+    name: str
+    role: str
+    key_prefix: str
+    created_by: str
+    created_at: Any
+    expires_at: Any | None = None
+    last_used_at: Any | None = None
+    revoked_at: Any | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ApiKeyCreatedResponse(ApiKeyResponse):
+    """Created key metadata plus the one-time full secret. ``api_key`` is never retrievable again."""
+
+    api_key: str

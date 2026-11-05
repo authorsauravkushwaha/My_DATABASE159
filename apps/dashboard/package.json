@@ -1,6 +1,6 @@
 {
   "name": "@kestrel/dashboard",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,7 +11,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@kestrel/client": "0.2.0",
+    "@kestrel/client": "0.3.0",
     "@mdx-js/vue": "3.1.1",
     "vue": "3.5.44",
     "vue-router": "4.6.4"
