@@ -31,7 +31,7 @@ jobs:
         env:
           VITE_BASE: /${{ github.event.repository.name }}/
         run: bash scripts/build-site.sh
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
         with:
           # The repository owner enables Pages once from Settings → Pages when this
           # is not permitted by the token. `enablement: true` lets the workflow do it
